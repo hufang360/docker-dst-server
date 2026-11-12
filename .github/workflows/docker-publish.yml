@@ -56,7 +56,7 @@ jobs:
             set -eux
             /lib/x86_64-linux-gnu/libc.so.6 | head -1
             /lib/i386-linux-gnu/libc.so.6   | head -1
-            glibc=$(/lib/x86_64-linux-gnu/libc.so.6 | head -1 | grep -oE "2\.[0-9]+")
+            glibc=$(/lib/x86_64-linux-gnu/libc.so.6 | head -1 | grep -oE "2\.[0-9]+" | head -1)
             [ "$(printf "%s\n2.29\n" "$glibc" | sort -V | tail -1)" = "$glibc" ] || { echo "glibc too old: $glibc"; exit 1; }
             test -x /opt/steamcmd/steamcmd.sh
             test -x /usr/local/bin/entrypoint.sh
