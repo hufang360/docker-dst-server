@@ -1,6 +1,0 @@
-#!/bin/bash
-set -eu
-
-STEAMCMD_PATH=${STEAMCMD_PATH:=/opt/steamcmd/steamcmd.sh}
-
-exec "${STEAMCMD_PATH}" "${@:1}"

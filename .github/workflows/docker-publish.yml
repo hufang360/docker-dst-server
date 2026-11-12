@@ -1,0 +1,123 @@
+name: docker-publish
+
+# Only the "latest-slim" tag is published (no game files inside the image).
+# Registries: GitHub Container Registry (always) + Docker Hub (when secrets exist).
+
+on:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "README.md"
+      - "LICENSE"
+  schedule:
+    - cron: "0 3 * * 1" # every Monday 03:00 UTC, to pick up Debian security updates
+  workflow_dispatch:
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write # push to ghcr.io
+
+env:
+  LOCAL_IMAGE: dst-server:ci
+  TAG: latest-slim
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build once, keep it locally for the checks below
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64 # Klei ships x86/x64 binaries only, never add arm64
+          push: false
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Smoke test (glibc / i386 / steamcmd / entrypoint)
+        run: |
+          set -eux
+          docker run --rm --entrypoint bash "${LOCAL_IMAGE}" -c '
+            set -eux
+            /lib/x86_64-linux-gnu/libc.so.6 | head -1
+            /lib/i386-linux-gnu/libc.so.6   | head -1
+            glibc=$(/lib/x86_64-linux-gnu/libc.so.6 | head -1 | grep -oE "2\.[0-9]+")
+            [ "$(printf "%s\n2.29\n" "$glibc" | sort -V | tail -1)" = "$glibc" ] || { echo "glibc too old: $glibc"; exit 1; }
+            test -x /opt/steamcmd/steamcmd.sh
+            test -x /usr/local/bin/entrypoint.sh
+            test -x /usr/local/bin/healthcheck.sh
+            test -x /usr/local/bin/dst-server
+            test -f /etc/supervisor/supervisord.conf
+          '
+
+      # latest-slim must NOT contain the game itself
+      - name: Assert image has no DST game files
+        run: |
+          set -eux
+          docker run --rm --entrypoint bash "${LOCAL_IMAGE}" -c '
+            set -eux
+            test -d /opt/dst_server
+            test -z "$(ls -A /opt/dst_server)"
+            test ! -e /opt/dst_server/bin
+            test ! -e /opt/dst_server/bin64
+            if find / -xdev -name "dontstarve_dedicated_server_nullrenderer*" 2>/dev/null | grep -q .; then
+              echo "game binaries found inside the image!"; exit 1
+            fi
+          '
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push to GHCR
+        run: |
+          set -eux
+          IMAGE="ghcr.io/${{ github.repository_owner }}/dst-server:${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "### GHCR: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check Docker Hub secrets
+        id: dockerhub
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DH_USER}" ] && [ -n "${DH_TOKEN}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN not set, skipping Docker Hub push"
+          fi
+
+      - name: Push to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -eux
+          echo "${DH_TOKEN}" | docker login docker.io -u "${DH_USER}" --password-stdin
+          IMAGE="${DH_USER}/dst-server:${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "### Docker Hub: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Digests
+        run: |
+          set -eux
+          docker image inspect "${LOCAL_IMAGE}" --format '{{json .RepoDigests}}' || true

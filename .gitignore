@@ -65,3 +65,9 @@ $RECYCLE.BIN/
 
 
 # End of https://www.gitignore.io/api/macos,windows,visualstudiocode
+
+# 本地数据（存档/令牌/游戏本体），绝不提交
+data/
+.env
+*.bak.*
+.env

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Pick the 32-bit (bin) or 64-bit (bin64) server according to DST_SERVER_ARCH
+set -eu
+
+DST_SERVER_PATH="${DST_SERVER_PATH:-/opt/dst_server}"
+DST_SERVER_ARCH="${DST_SERVER_ARCH:-x86}"
+
+case "${DST_SERVER_ARCH}" in
+    x86|i386|386)
+        DIR=bin
+        EXE=dontstarve_dedicated_server_nullrenderer
+        ;;
+    amd64|x86_64|x64)
+        DIR=bin64
+        EXE=dontstarve_dedicated_server_nullrenderer_x64
+        ;;
+    *)
+        echo >&2 "unknown DST_SERVER_ARCH: ${DST_SERVER_ARCH} (expect x86 or amd64)"
+        exit 255
+        ;;
+esac
+
+cd "${DST_SERVER_PATH}/${DIR}"
+exec "./${EXE}" "$@"

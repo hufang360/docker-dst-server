@@ -1,200 +1,152 @@
-# Don't Starve Together Dedicated Server Docker Image
+# Don't Starve Together 专用服务器镜像（bookworm-slim 自建版）
 
-They write their server setup instructions like sh*t, so we made this Docker image to simplify things.
+这是 [`Jamesits/docker-dst-server`](https://github.com/Jamesits/docker-dst-server) 的 fork，
+用来解决上游 `latest-slim` 镜像**过旧**的问题。
 
-Please read the whole document before putting your hands on your server. 
+- 上游 `latest-slim` 最后一次构建是 **2022-05-21**，基础镜像 `debian:buster-slim`（glibc **2.28**）。
+- Klei 更新后的 DST 服务端要求 `GLIBC_2.29`，用旧镜像启动会直接报错：
 
-[![Build Status](https://dev.azure.com/nekomimiswitch/General/_apis/build/status/docker-dst-server?branchName=master)](https://dev.azure.com/nekomimiswitch/General/_build/latest?definitionId=80&branchName=master)
+  ```
+  ./dontstarve_dedicated_server_nullrenderer_x64: /lib/x86_64-linux-gnu/libm.so.6:
+  version `GLIBC_2.29' not found (required by ./dontstarve_dedicated_server_nullrenderer_x64)
+  ```
 
-----------
+本仓库改为 `FROM debian:bookworm-slim`（glibc **2.36**），并保持 `latest-slim` 语义：
+**镜像内不含游戏本体**，游戏文件由宿主机挂载到 `/opt/dst_server`，容器启动时用 steamcmd 自更新。
 
-## Versioning
+## 镜像
 
-The DST server code changes a lot. We offer multiple variants (tags) on [Docker Hub](https://hub.docker.com/r/jamesits/dst-server/):
+只发布一个 tag：`latest-slim`。
 
-* `latest` or `vanilla` are less frequently updated images, recommended for day-to-day use
-* `nightly` is a nightly built image, so it (hopefully) comes with the latest server code
-* `steamcmd-rebase` works the same way as `latest` but is based on [`cm2network/steamcmd:root`](https://hub.docker.com/r/cm2network/steamcmd)
+| Registry | Image |
+| --- | --- |
+| Docker Hub | `hufang360/dst-server:latest-slim` |
+| GHCR | `ghcr.io/hufang360/dst-server:latest-slim` |
 
-All variants except `nightly` also have a `-slim` tagged version which does not come with DST server pre-installed; required files will be downloaded every time the container is launched. The `-slim` versions cannot be launched offline.
+- 仅 `linux/amd64`：Klei 只提供 x86/x64 服务端二进制，**没有 arm64**。
+- 不含游戏本体（`/opt/dst_server` 为空目录），因此镜像体积很小（约 395MB），
+  但**首次启动需要联网**用 steamcmd 下载游戏（约 2GB）。
+- 已包含 i386 运行库：DST 默认跑 32 位服务端，steamcmd 也跑 `linux32`。
+- 构建期已让 steamcmd 自我更新两次，容器启动时不会再多花 5 分钟下载 ~40MB 客户端。
 
-## Running
+## 快速开始
 
-### Prerequisites
-
- * Linux x86_64 and runs Docker (18.05.0-ce or later).
- * You may need a public IP to make your server accessable from Internet. 
- * You need 4 UDP ports exposed to the public network. (See FAQ for details.)
- * CPU: 1 core is somewhat enough for a small-scale server (but don't try 60 ticks, start from 15 or 30).
- * Memory: We recommend reserving 1GiB Memory for the server, plus 60MiB per active user.
- * Disk size: the Docker image takes 1.5GiB, and you need at least another 5MiB for maps, configs and logs. 4GiB available disk space is recommended.
-
-### Start server
-
-Let's assume you are saving your server config and status to `${HOME}/.klei/DoNotStarveTogether`. (This is the default location when it is running outside Docker, so we'll use this as an example. If you want to save it to other location, just mount that directory read-write to the /data folder of the container.)
-
-Start server:
-
-```shell
-docker run -v ${HOME}/.klei/DoNotStarveTogether:/data -p 10999-11000:10999-11000/udp -p 12346-12347:12346-12347/udp -e "DST_SERVER_ARCH=amd64" -it jamesits/dst-server:latest
-```
-
-If you use `docker-compose`, an [example config](https://github.com/Jamesits/docker-dst-server/blob/master/docker-compose.yml) is provided.
-
-### Stop server
-
-Just press `Ctrl+C` and wait a little while to let itself spin down. (If the server is saving data, don't press ^C twice to force kill the server.)
-
-To programmatically shut down the server, send a SIGINT to the `supervisord` process. 
-
-Note: the server may take up to ~5min to save map and fully shut down.
- 
-## Server Configuration
-
-If you don't already have a set of server config in your data directory, we will generate one for you. Start server once using the command above, and you will see:
-```
-Creating default server config...
-Please fill in `DoNotStarveTogether/Cluster_1/cluster_token.txt` with your cluster token and restart server!
-```
-
-To generate a cluster token (as of 2019-11-02):
-
-1. Open a genuine copy of Don't Starve Together client and log in
-2. Click "Play" to go to the main menu
-3. click "account" button on the bottom left of the main menu
-4. In the popup browser, click "GAMES" on the top nav bar
-5. Click "Don't Starve Toegther Servers" button on the top right
-6. Scroll down to "ADD NEW SERVER" section, fill in a server name (it is not important), and copy the generated token
-
-The token looks like `pds-g^aaaaaaaaa-q^jaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=`. Then either set `DST_CLUSTER_TOKEN` environment variable during `docker run`, or paste the token into `your_data_directory/DoNotStarveTogether/Cluster_1/cluster_token.txt`.
-
-If you need to add mods, change world generation config, etc., please do it now. Don't forget to edit `your_data_directory/DoNotStarveTogether/Cluster_1/cluster.ini` and get your server an unique name!
-
-After you finish this, re-run start server command, and the server should be running.
-
-## Build Docker image locally
-
-(In most cases you don't need this; just pull the prebuilt image from Docker Hub.)
-
-```shell
-git clone https://github.com/Jamesits/docker-dst-server.git docker-dst-server
+```bash
+git clone https://github.com/hufang360/docker-dst-server.git
 cd docker-dst-server
-docker build . -t dst-server:latest
+cp .env.example .env      # 填入 DST_CLUSTER_TOKEN
+docker compose up -d
 ```
 
-There are some arguments you can set via `--build-arg`:
+没有 `.env.example` 时也可以直接：
 
-* `BASE_IMAGE`: the `FROM` image (recent Debian or Ubuntu based images are supported)
-* `STEAMCMD_PATH`: where is `steamcmd.sh` in the base image
-* `DST_DOWNLOAD`: set to `1` to embed DST server into the image
-* `DST_USER`: the user to run server as (inside container)
-* `DST_GROUP`: the group to run server as (inside container)
-
-
-## Known Issues
-
- * On Docker environment which doesn't support UDP port forwarding, LAN only server cannot be used. (Still you can enable Steam punchthrough and search for your server in `Online` catalog. )
- * Docker IPv6 support is another sh\*t and we currently don't have any idea on it. Help and advices are always welcomed. (see [#7](https://github.com/Jamesits/docker-dst-server/issues/7).)
-
-## FAQ
-
-#### How to update server or mods?
-
-Restart the server. Updates will be downloaded automatically.
-
-#### How to connect to a LAN only server?
-
-Run `c_connect("IP address", port)` or `c_connect("IP address", port, "password")` in client console.
-
-#### How to check if the server is online?
-
-You can try the 3rd party website [Don't Starve Together Server List](https://dstserverlist.appspot.com).
-
-#### What port does this server require?
-
-You need to expose UDP 10999 (master) and 11000 (caves) for client to connect; udp 12346 and 12347 for steam connection. Don't NAT these ports to different port numbers.
-
-The server use another 2 high UDP ports for unknown communication, and UDP 10998 (listen on localhost) for communication between cluster servers.
-
-Here is a `netstat -tulpn` output on our test server:
-```
-Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name    
-udp        0      0 0.0.0.0:12346           0.0.0.0:*                           54/./dontstarve_ded 
-udp        0      0 0.0.0.0:12347           0.0.0.0:*                           53/./dontstarve_ded 
-udp        0      0 0.0.0.0:38223           0.0.0.0:*                           53/./dontstarve_ded 
-udp        0      0 0.0.0.0:36517           0.0.0.0:*                           54/./dontstarve_ded 
-udp        0      0 127.0.0.1:10998         0.0.0.0:*                           54/./dontstarve_ded 
-udp        0      0 0.0.0.0:10999           0.0.0.0:*                           54/./dontstarve_ded 
-udp        0      0 0.0.0.0:11000           0.0.0.0:*                           53/./dontstarve_ded 
+```bash
+export DST_CLUSTER_TOKEN='pds-g^KU_xxxxxxxxxxxxxxxxxxxxxxxx'
+docker compose up -d
 ```
 
-#### Error! App '343050' state is 0x202 after update job.
+目录布局：
 
-Your disk is full.
+```
+.
+├── docker-compose.yml
+└── data/
+    ├── dst_server/   # 游戏本体（容器启动时 steamcmd 下载到这里）
+    └── dst_data/     # /data：服务器配置 + 存档（cluster_token.txt、Cluster_1/...）
+```
 
-#### Error! App '343050' state is 0x602 after update job.
+首次启动时，如果 `data/dst_data` 是空的，容器会把内置的默认配置模板
+（`dst_default_config/`）复制进去，然后写入 `cluster_token.txt`。
 
-Usually there is a file system permission issue preventing steamcmd from writing to your game installation directory.
+启动完成后：
 
-#### Client high latency or lagging
+```bash
+docker ps --filter name=dst-server --format '{{.Status}}'   # 期望 Up (healthy)
+docker exec dst-server supervisorctl status                 # 期望 master/cave 都 RUNNING
+```
 
-Possible causes:
+> healthcheck 的 `start-period` 是 10 分钟：首次启动要 steamcmd 下载游戏，不要把它改小。
+> 状态在一段时间内显示 `starting` 是正常的。
 
-* High packet drop rate
-* High server tick rate with low-performance clients (e.g. notebook users with tick rate 60) 
+## 环境变量
 
-#### How can I copy local data to server?
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DST_CLUSTER_TOKEN` | — | 集群令牌（必填），会写入 `data/dst_data/DoNotStarveTogether/<cluster>/cluster_token.txt` |
+| `DST_CLUSTER_NAME` | `Cluster_1` | 集群目录名 |
+| `DST_SERVER_ARCH` | `x86` | `x86` 用 `bin/`（32 位），`amd64` 用 `bin64/`（64 位） |
+| `DST_SKIP_UPDATE` | `0` | 设为 `1` 跳过启动时的游戏本体更新（离线 / 已预下载） |
+| `DST_SKIP_MOD_UPDATE` | `0` | 设为 `1` 跳过启动时的 mod 更新 |
+| `DST_USER_DATA_PATH` | `/data` | 配置与存档目录 |
+| `DST_SERVER_PATH` | `/opt/dst_server` | 游戏本体目录 |
+| `STEAMCMD_PATH` | `/opt/steamcmd/steamcmd.sh` | 设为 `/bin/true` 可禁用 steamcmd |
 
-Local data is stored in `<User Documents>\Klei\DoNotStarveTogether\<Random Number>`.
+容器内用 supervisor 同时跑 **Master + Caves** 两个分片（端口 10999-11000/udp、12346-12347/udp）。
 
-There are two situations:
-1. Local data has cave enabled.\
-Just copy the `Cluster_X` to server and rename to `Cluster_1`, then it should work.
-2. Local data has no cave.\
-Copy everything in `client_save` except `session` and `Cluster_X/save/session` to server `Cluster_1/save`.\
-If your local data is not in slot 1, you also have to modify `saveindex` because the server recognize only the first slot.\
-The server will create a cave for you. If you don't want the cave, you have to modify `supervisor.conf` to disable cave server.
+## 构建与发布
 
-#### How can I enable mods after copy local data to server?
+本地构建（Apple Silicon 上测 `linux/amd64` 请用 buildx）：
 
-Open `Cluster_X/Master/modoverrides.lua` and you will see something like `workshop-XXXXX` where `XXXXX` is a number.\
-Open `Cluster_1/mods/dedicated_server_mods_setup.lua` on server and write `ServerModSetup("XXXXX")`.
+```bash
+docker buildx build --platform linux/amd64 -t dst-server:test --load .
+```
 
-## Maintainer
+镜像校验（不需要游戏文件）：
 
- * [James Swineson](https://swineson.me)
- 
-## Thanks
+```bash
+docker run --rm --entrypoint bash dst-server:test -c '
+  /lib/x86_64-linux-gnu/libc.so.6 | head -1
+  /lib/i386-linux-gnu/libc.so.6   | head -1
+  ls -A /opt/dst_server            # 期望：空（slim，不含游戏本体）
+'
+# 期望 glibc 2.36-9+deb12uXX
+```
 
- * [Mingye Wang](https://github.com/Arthur2e5)
- * [@MephistoMMM](https://github.com/MephistoMMM)
- * [@m13253](https://github.com/m13253)
- * [@wph95](https://github.com/wph95)
- * [DaoCloud](https://daocloud.io)
- * [CodeVS](http://codevs.cn/)
- * [I Choose Death Too](https://steamcommunity.com/id/ichoosedeathtoo/)
- 
-## License
+有游戏文件时的动态库检查：
 
-    Don't Starve Together Dedicated Server Docker Image
-    Copyright (C) 2015-2018 James Swineson (Jamesits) and Mingye Wang (Arthur2e5)
+```bash
+docker run --rm -v "$PWD/data/dst_server:/opt/dst_server:ro" --entrypoint bash dst-server:test -c '
+  for b in /opt/dst_server/bin64/dontstarve_dedicated_server_nullrenderer_x64 \
+           /opt/dst_server/bin/dontstarve_dedicated_server_nullrenderer; do
+    echo "[$b]"; ldd "$b" | grep "not found" || echo "  all resolved"; done'
+```
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
+CI：[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+- push 到 `master` / 每周一 03:00 UTC 定时 / 手动 `workflow_dispatch` 触发。
+- 构建后先跑 smoke test（glibc >= 2.29、i386 库、入口脚本、steamcmd），
+  再断言镜像内**没有**游戏本体，最后推 GHCR；配置了 Docker Hub secrets 时同时推 Docker Hub。
+- 需要 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`
+  （Docker Hub → Account Settings → Personal access tokens，Read/Write；
+  且 Docker Hub 上必须**先手动创建** `hufang360/dst-server` 仓库，否则 push 会被拒绝）。
 
-    You should have received a copy of the GNU General Public License along
-    with this program; if not, write to the Free Software Foundation, Inc.,
-    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+## 注意事项（踩过的坑）
 
-## References
+1. **`cluster.ini` 禁止行内 `;` 注释。** 新版本服务端会把行内注释当成值的一部分，
+   例如 `shard_enabled = true ; enable shards` 会被解析成 `false`，导致洞穴分片自己当主分片去登记，
+   日志刷 `Master Server Broadcast Error: E_ROWID_EXIST`，`game_mode` 报 `MOD ERROR`。
+   注释请单独占一行（以 `;` 或 `#` 开头）。
+2. **`stop_grace_period` 必须大于两个分片的 `stopwaitsecs` 之和**：当前 5m > 120s × 2，
+   改小任何一边都可能让世界来不及保存就被 SIGKILL。
+3. **只支持 amd64**，不要在 CI 里加 `platforms: linux/arm64`。
+4. **不要把 `data/`、`.env` 提交到仓库**（含存档、`cluster_token.txt`、集群令牌明文）。
+   已由 `.gitignore` 覆盖；若误推，请立刻去 Klei 账号页**重置令牌**。
+5. 上游 2022 年的镜像仍在 Docker Hub 的 `jamesits/dst-server` 命名空间下，
+   compose 里务必使用自己的镜像名，避免 `docker compose pull` 把镜像换回旧版。
+6. 构建期会访问 Steam 下载 steamcmd 并自我更新，网络抖动导致失败时重跑即可。
+7. 若将来 Debian 移除 i386 库，可改用 `DST_SERVER_ARCH=amd64` 去掉 32 位依赖，
+   或退回 `debian:bullseye-slim`（glibc 2.31）。
 
- * [How to setup dedicated server with cave on Linux](https://steamcommunity.com/sharedfiles/filedetails/?id=590565473)
- * [How to install,configure and update mods on Dedicated Server](https://steamcommunity.com/sharedfiles/filedetails/?id=591543858)
- * [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD)
+## 与上游的差异
+
+- 基础镜像 `debian:buster-slim` → `debian:bookworm-slim`（glibc 2.28 → 2.36）。
+- 不再构建 `latest` / `nightly` / `steamcmd-rebase` 等变体，只保留 `latest-slim`。
+- 构建期不下载游戏本体（`DST_DOWNLOAD=0` 的等价行为），镜像内 `/opt/dst_server` 为空。
+- supervisor 改为在同一个容器内固定跑 Master + Caves 双分片，健康检查要求两者都 RUNNING。
+- 入口脚本重写：支持 `DST_SERVER_ARCH` 选择 32/64 位、支持 `DST_CLUSTER_NAME`，
+  空数据目录自动铺默认配置，令牌缺失时给出明确错误信息。
+- CI 从 Azure Pipelines / DaoCloud 换成 GitHub Actions，同时推 GHCR 与 Docker Hub。
+
+## 许可
+
+沿用上游 [GPL-2.0](LICENSE)。

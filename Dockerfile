@@ -1,67 +1,98 @@
-ARG BASE_IMAGE=debian:buster-slim
-FROM $BASE_IMAGE
-LABEL maintainer="James Swineson <docker@public.swineson.me>"
+# Don't Starve Together dedicated server —— self-built image (slim variant)
+#
+# Not based on any third-party DST image. Builds directly on the official Debian
+# image so that we get a modern glibc:
+#   * bookworm-slim => glibc 2.36, satisfies the new DST server (>= GLIBC_2.29)
+#     (the upstream jamesits/docker-dst-server:latest-slim is buster/glibc 2.28
+#      and crashes with "version `GLIBC_2.29' not found")
+#   * "slim" means the image does NOT contain the game itself: game files live
+#     on the host and are mounted at /opt/dst_server, the container downloads /
+#     updates them with steamcmd on start (set DST_SKIP_UPDATE=1 to skip).
+#
+# Build:
+#   docker build -t <user>/dst-server:latest-slim .
+#
+FROM debian:bookworm-slim
+
+LABEL maintainer="hufang360" \
+      description="Don't Starve Together dedicated server (slim, self-built on debian:bookworm-slim)" \
+      org.opencontainers.image.source="https://github.com/hufang360/docker-dst-server" \
+      org.opencontainers.image.licenses="GPL-2.0"
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG STEAMCMD_URL=https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
-ARG STEAMCMD_PATH=/opt/steamcmd/steamcmd.sh
-ARG DST_DOWNLOAD=1
-ARG LANG=C.UTF-8
-ARG LC_ALL=C.UTF-8
+ARG STEAMCMD_URL=https://media.steampowered.com/client/installer/steamcmd_linux.tar.gz
 ARG DST_USER=dst
 ARG DST_GROUP=dst
 ARG DST_USER_DATA_PATH=/data
+ARG DST_SERVER_PATH=/opt/dst_server
+ARG DST_APP_ID=343050
 
-# install packages
-RUN dpkg --add-architecture i386 \
-    && apt-get update -y \
-    && apt-get install -y --no-install-recommends ca-certificates lib32stdc++6 libcurl3-gnutls:i386 libcurl3-gnutls wget tar supervisor \
-    && (apt-get install -y --no-install-recommends lib32gcc-s1 || apt-get install -y --no-install-recommends lib32gcc1) \
-    && apt-get autoremove -y \
-    && apt-get clean -y \
-    && rm -rf /var/lib/apt/lists/*
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    STEAMCMD_PATH=/opt/steamcmd/steamcmd.sh \
+    DST_APP_ID=${DST_APP_ID} \
+    DST_USER=${DST_USER} \
+    DST_GROUP=${DST_GROUP} \
+    DST_USER_DATA_PATH=${DST_USER_DATA_PATH} \
+    DST_SERVER_PATH=${DST_SERVER_PATH} \
+    DST_SERVER_ARCH=x86 \
+    DST_SKIP_UPDATE=0
 
-# create data directory
-RUN mkdir -p "${DST_USER_DATA_PATH}" \
-    # Add unprivileged user
-    && ( groupadd "${DST_GROUP}" || true ) \
-    && ( useradd -g "${DST_GROUP}" -d "${DST_USER_DATA_PATH}" "${DST_USER}" || true )\
-    && chown -R "${DST_USER}:${DST_GROUP}" "${DST_USER_DATA_PATH}"
+# Runtime dependencies
+#   lib32gcc-s1 / lib32stdc++6 : steamcmd (linux32) and the 32-bit DST server
+#   libcurl3-gnutls[:i386]     : steamcmd / DST runtime
+#   supervisor                 : run Master + Caves shards in one container
+RUN set -eux; \
+    dpkg --add-architecture i386; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates wget tar procps supervisor \
+        lib32gcc-s1 lib32stdc++6 \
+        libcurl3-gnutls libcurl3-gnutls:i386; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
-# install steamcmd only if steamcmd doesn't exist
-RUN test -e "${STEAMCMD_PATH}" && echo "Steamcmd detected" \
-    || ( \
-    echo "Installing steamcmd" \
-    && mkdir -p /opt/steamcmd \
-    && wget "${STEAMCMD_URL}" -O /tmp/steamcmd.tar.gz \
-    && tar -xvzf /tmp/steamcmd.tar.gz -C /opt/steamcmd \
-    && rm -rf /tmp/* \
-    )
+# Unprivileged user + directories
+RUN set -eux; \
+    groupadd --system "${DST_GROUP}"; \
+    useradd --system --gid "${DST_GROUP}" --home-dir "${DST_USER_DATA_PATH}" \
+            --shell /bin/bash --no-create-home "${DST_USER}"; \
+    mkdir -p "${DST_USER_DATA_PATH}" "${DST_SERVER_PATH}" /opt/steamcmd /var/run; \
+    chown -R "${DST_USER}:${DST_GROUP}" "${DST_USER_DATA_PATH}"
 
-# install helper tools
-COPY supervisor /etc/supervisor/
-COPY scripts_system /usr/local/bin/
-COPY scripts_steam /opt/steamcmd_scripts/
-RUN chmod +x /usr/local/bin/*
+# steamcmd (it self-updates on start)
+RUN set -eux; \
+    wget -q -O /tmp/steamcmd.tar.gz "${STEAMCMD_URL}"; \
+    tar -xzf /tmp/steamcmd.tar.gz -C /opt/steamcmd; \
+    rm -f /tmp/steamcmd.tar.gz; \
+    test -x "${STEAMCMD_PATH}"; \
+    chmod +x "${STEAMCMD_PATH}"
 
-# install Don't Starve Together server
-RUN mkdir -p /opt/dst_server \
-    && chown -R "${DST_USER}:${DST_GROUP}" /opt/dst_server \
-    && ( test "${DST_DOWNLOAD}" = "1" && steamcmd +runscript /opt/steamcmd_scripts/install_dst_server_initial || echo "Skipping DST server download" ) \
-    && rm -rf /root/Steam /root/.steam
+# Run steamcmd twice at build time so that it finishes its self-update here
+# (otherwise every container start would download ~40MB of client again).
+RUN set -eux; \
+    ( "${STEAMCMD_PATH}" +quit || true ); \
+    ( "${STEAMCMD_PATH}" +quit || true ); \
+    rm -rf /root/Steam /root/.steam
 
-# install default config
-COPY dst_default_config /opt/dst_default_config/
-RUN chown -R "${DST_USER}:${DST_GROUP}" /opt/dst_default_config
+# Scripts, supervisor config and default config templates
+COPY docker/entrypoint.sh     /usr/local/bin/entrypoint.sh
+COPY docker/healthcheck.sh    /usr/local/bin/healthcheck.sh
+COPY docker/dst-server        /usr/local/bin/dst-server
+COPY docker/supervisord.conf  /etc/supervisor/supervisord.conf
+COPY dst_default_config       /opt/dst_default_config
+RUN set -eux; \
+    chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/dst-server; \
+    chown -R "${DST_USER}:${DST_GROUP}" /opt/dst_default_config; \
+    test ! -e "${DST_SERVER_PATH}/bin" && test ! -e "${DST_SERVER_PATH}/bin64"
 
-# pass essential environment variables into the container
-ENV STEAMCMD_PATH=$STEAMCMD_PATH
-ENV DST_USER=$DST_USER
-ENV DST_GROUP=$DST_GROUP
-ENV DST_USER_DATA_PATH=$DST_USER_DATA_PATH
-VOLUME [ "${DST_USER_DATA_PATH}" ]
+VOLUME [ "/data" ]
+VOLUME [ "/opt/dst_server" ]
 
 EXPOSE 10999-11000/udp 12346-12347/udp
-ENTRYPOINT [ "entrypoint.sh" ]
-CMD ["supervisord", "-c", "/etc/supervisor/supervisor.conf", "-n"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD [ "healthcheck.sh" ]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \
+    CMD [ "/usr/local/bin/healthcheck.sh" ]
+
+ENTRYPOINT [ "/usr/local/bin/entrypoint.sh" ]
+CMD [ "supervisord", "-c", "/etc/supervisor/supervisord.conf", "-n" ]

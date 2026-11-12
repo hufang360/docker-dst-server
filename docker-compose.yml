@@ -1,11 +1,20 @@
-version: '3.5'
 services:
   dst-server:
-     image: jamesits/dst-server:latest
-     restart: "on-failure:5"
-     ports:
-        - "10999-11000:10999-11000/udp"
-        - "12346-12347:12346-12347/udp"
-     volumes:
-        - ~/.klei/DoNotStarveTogether:/data
-     stop_grace_period: 6m
+    image: ${DST_IMAGE:-hufang360/dst-server:latest-slim}
+    platform: linux/amd64 # there is no arm64 DST server binary, keep this line
+    container_name: dst-server
+    restart: "on-failure:5"
+    stop_grace_period: 5m # must stay > supervisor stopwaitsecs (120s) * 2 shards
+    environment:
+      - TZ=Asia/Shanghai
+      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN}
+      # - DST_CLUSTER_NAME=Cluster_1
+      # - DST_SERVER_ARCH=amd64     # run the 64-bit server instead (needs bin64/)
+      # - DST_SKIP_UPDATE=1         # offline / pre-downloaded game files
+      # - DST_SKIP_MOD_UPDATE=1     # skip mod update on start
+    ports:
+      - "10999-11000:10999-11000/udp"
+      - "12346-12347:12346-12347/udp"
+    volumes:
+      - ./data/dst_server:/opt/dst_server # game files (host-owned, NOT in the image)
+      - ./data/dst_data:/data             # server config + saves
