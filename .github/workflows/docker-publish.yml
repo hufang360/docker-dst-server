@@ -65,6 +65,16 @@ jobs:
             test -f /etc/supervisor/supervisord.conf
           '
 
+      # entrypoint exports these ENV_* values; supervisord must be able to expand them
+      - name: Validate supervisord config
+        run: |
+          set -eux
+          docker run --rm -i --entrypoint python3 "${LOCAL_IMAGE}" - <<'PY'
+          from supervisor.options import ServerOptions
+          ServerOptions().realize(["-c", "/etc/supervisor/supervisord.conf"])
+          print("supervisord config ok")
+          PY
+
       # latest-slim must NOT contain the game itself
       - name: Assert image has no DST game files
         run: |
