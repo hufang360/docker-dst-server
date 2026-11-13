@@ -1,31 +1,22 @@
 services:
   dst-server:
     image: ${DST_IMAGE:-hufang360/dst-server:latest-slim}
-    platform: linux/amd64 # there is no arm64 DST server binary, keep this line
+    platform: linux/amd64 # Klei 没有发布 arm64 服务端，这一行不要删（arm 机器靠模拟运行）
     container_name: dst-server
-    restart: "on-failure:5"
-    stop_grace_period: 5m # must stay > supervisor stopwaitsecs (120s) * 2 shards
+    restart: "on-failure:5" # 失败后重启，最多 5 次
+    stop_grace_period: 5m # 必须大于 supervisor 的 stopwaitsecs(120s) × 2 个分片，留给世界存盘
     environment:
       - TZ=Asia/Shanghai
-      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN}
-      # - DST_CLUSTER_NAME=Cluster_1
-      # - DST_SERVER_ARCH=amd64     # run the 64-bit server instead (needs bin64/)
-      # - DST_SKIP_UPDATE=1         # never run steamcmd: use pre-downloaded game files
-      # - DST_SKIP_MOD_UPDATE=1     # skip mod update on start
+      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN} # 集群令牌（必填），来自 Klei 账号页
+      # - DST_CLUSTER_NAME=Cluster_1        # 集群目录名，开多个服务器时改这个
+      # - DST_SERVER_ARCH=amd64             # 改跑 64 位服务端（需要 bin64/ 已下载）
+      # - DST_SKIP_UPDATE=1                 # 完全不调用 steamcmd：用已下载好的游戏本体
+      # - DST_SKIP_MOD_UPDATE=1             # 启动时不更新 mod
     ports:
-      - "10999-11000:10999-11000/udp"
-      - "12346-12347:12346-12347/udp"
+      - "10999-11000:10999-11000/udp" # 游戏端口（Master / Caves 两个分片）
+      - "12346-12347:12346-12347/udp" # Steam 相关端口
     volumes:
-      - ./data/dst_server:/opt/dst_server # game files (host-owned, NOT in the image)
-      - ./data/dst_data:/data             # server config + saves
-
-  # Optional helper: pre-download the game files into ./data/dst_server.
-  #   docker compose run --rm depotdownloader
-  # Then start dst-server with DST_SKIP_UPDATE=1 (and DST_SKIP_MOD_UPDATE=1).
-  depotdownloader:
-    image: hufang360/depotdownloader # multi-arch: runs natively on arm64
-    profiles: ["tools"]
-    volumes:
-      - ./data/dst_server:/steam
-    command: >
-      -app 343050 -os linux -osarch 64 -branch public -dir /steam -validate
+      - ./data/dst_server:/opt/dst_server # 游戏本体（约 2GB，放在宿主机，不打进镜像）
+      - ./data/dst_data:/data             # 配置 + 存档（要备份的是这个）
+  # 需要预下载 / 在 arm 机器上更新游戏本体：用 docker-compose.dd.yml
+  #   docker compose -f docker-compose.dd.yml run --rm depotdownloader

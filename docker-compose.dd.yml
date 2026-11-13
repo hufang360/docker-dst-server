@@ -1,0 +1,52 @@
+# 下载器版本：latest-slim-dd（DepotDownloader，amd64 + arm64 均原生运行）
+#
+# 和 docker-compose.yml（slim，只跑）的区别：
+#   * 先由 depotdownloader 把游戏本体拉进 ./data/dst_server（不经过 steamcmd / 模拟层）；
+#   * dst-server 只当运行环境（DST_SKIP_UPDATE=1），仍然 platform: linux/amd64。
+#
+# 用法：
+#   docker compose -f docker-compose.dd.yml run --rm depotdownloader   # 只下载/更新本体
+#   docker compose -f docker-compose.dd.yml up -d                      # 下载完再起服务
+#   docker compose -f docker-compose.dd.yml restart dst-server         # 更新后重启
+#
+# 注意：depotdownloader 是一次性任务（restart: "no"），每次 `up -d` 都会重新校验/补齐本体，
+# 下完就退出；dst-server 用 depends_on(service_completed_successfully) 等它退出后再启动。
+#
+# 只想跑服务、用 steamcmd 自己下载（amd64 主机）：继续用 docker-compose.yml。
+services:
+  # 下载游戏本体：appid 343050，linux 64 位公开分支（对应 bin64/）
+  # 32 位本体：加 command: -app 343050 -os linux -osarch 32 -dir /steam -validate
+  depotdownloader:
+    image: ${DST_IMAGE_DD:-hufang360/dst-server:latest-slim-dd}
+    container_name: dst-depotdownloader
+    # 不要写 platform: 这个镜像有原生 arm64，arm 机器上直接跑、不经过模拟层
+    restart: "no" # 一次性任务：下完就退出，由 dst-server 的 depends_on 接力
+    environment:
+      - TZ=Asia/Shanghai
+      # - DST_DEPOT_OSARCH=32     # 改拉 32 位本体（bin/）
+      # - DST_DEPOT_VALIDATE=0    # 关掉逐文件校验（更快，但可能留下残缺文件）
+    volumes:
+      - ./data/dst_server:/steam
+
+  dst-server:
+    image: ${DST_IMAGE:-hufang360/dst-server:latest-slim}
+    platform: linux/amd64 # Klei 没有发布 arm64 服务端，这一行不要删（arm 机器靠模拟运行）
+    container_name: dst-server
+    restart: "on-failure:5" # 失败后重启，最多 5 次
+    stop_grace_period: 5m # 必须大于 supervisor 的 stopwaitsecs(120s) × 2 个分片，留给世界存盘
+    depends_on:
+      depotdownloader:
+        condition: service_completed_successfully # 本体没下好就不要启动
+    environment:
+      - TZ=Asia/Shanghai
+      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN} # 集群令牌（必填），来自 Klei 账号页
+      # - DST_CLUSTER_NAME=Cluster_1        # 集群目录名，开多个服务器时改这个
+      - DST_SERVER_ARCH=amd64 # 与下载的 64 位本体（bin64/）对应；拉 32 位本体时删掉这行
+      - DST_SKIP_UPDATE=1 # 别在模拟层里跑 32 位 steamcmd，本体由 depotdownloader 提供
+      - DST_SKIP_MOD_UPDATE=1 # mod 不会被自动更新，需另外准备好 data/dst_data/.../mods
+    ports:
+      - "10999-11000:10999-11000/udp" # 游戏端口（Master / Caves 两个分片）
+      - "12346-12347:12346-12347/udp" # Steam 相关端口
+    volumes:
+      - ./data/dst_server:/opt/dst_server # 游戏本体（由 depotdownloader 下载到这里）
+      - ./data/dst_data:/data             # 配置 + 存档（要备份的是这个）
