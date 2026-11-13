@@ -1,7 +1,14 @@
 # Don't Starve Together 专用服务器镜像（bookworm-slim 自建版）
 
+| | |
+| --- | --- |
+| 本项目仓库 | <https://github.com/hufang360/docker-dst-server> |
+| 上游项目 | <https://github.com/Jamesits/docker-dst-server> |
+| Docker Hub | <https://hub.docker.com/r/hufang360/dst-server> |
+| GitHub Container Registry | <https://github.com/hufang360/docker-dst-server/pkgs/container/dst-server> |
+
 这是 [`Jamesits/docker-dst-server`](https://github.com/Jamesits/docker-dst-server) 的 fork，
-用来解决上游 `latest-slim` 镜像**过旧**的问题。
+用来解决上游 `latest-slim` 镜像**过旧**的问题：
 
 - 上游 `latest-slim` 最后一次构建是 **2022-05-21**，基础镜像 `debian:buster-slim`（glibc **2.28**）。
 - Klei 更新后的 DST 服务端要求 `GLIBC_2.29`，用旧镜像启动会直接报错：
@@ -16,20 +23,24 @@
 
 ## 镜像
 
-只发布一个 tag：`latest-slim`。
+只发布一个 tag：`latest-slim`（两个 registry 内容完全相同）。
 
 | Registry | Image |
 | --- | --- |
 | Docker Hub | `hufang360/dst-server:latest-slim` |
 | GHCR | `ghcr.io/hufang360/dst-server:latest-slim` |
 
+- **约 58MB**（压缩后，amd64），和上游 slim 持平；**镜像内没有任何游戏本体文件**
+  （`/opt/dst_server` 是空目录，游戏文件由 volume 提供）。
+- 首次启动时 steamcmd 会自更新并下载游戏（约 2GB），之后重启不再下载。
+  想要「镜像里已预热 steamcmd、首次启动更快」的版本，可以自行构建并加
+  `--build-arg STEAMCMD_PREWARM=1`（镜像会涨到约 170MB，见下文「体积与预热」）。
 - 仅 `linux/amd64`：Klei 只提供 x86/x64 服务端二进制，**没有 arm64**。
-- 不含游戏本体（`/opt/dst_server` 为空目录），因此镜像体积很小（约 395MB），
-  但**首次启动需要联网**用 steamcmd 下载游戏（约 2GB）。
+  在 ARM 机器（如 Apple Silicon）上运行时 compose 里需要 `platform: linux/amd64`。
 - 已包含 i386 运行库：DST 默认跑 32 位服务端，steamcmd 也跑 `linux32`。
-- 构建期已让 steamcmd 自我更新两次，容器启动时不会再多花 5 分钟下载 ~40MB 客户端。
+- 容器内用 supervisor 同时跑 **Master + Caves** 两个分片。
 
-## 快速开始
+## 快速开始（docker compose）
 
 ```bash
 git clone https://github.com/hufang360/docker-dst-server.git
@@ -38,68 +49,153 @@ cp .env.example .env      # 填入 DST_CLUSTER_TOKEN
 docker compose up -d
 ```
 
-没有 `.env.example` 时也可以直接：
+`docker-compose.yml` 内容（可以直接复制到自己项目里改）：
 
-```bash
-export DST_CLUSTER_TOKEN='pds-g^KU_xxxxxxxxxxxxxxxxxxxxxxxx'
-docker compose up -d
+```yaml
+services:
+  dst-server:
+    image: hufang360/dst-server:latest-slim
+    platform: linux/amd64                  # ARM 机器上必须有这一行
+    container_name: dst-server
+    restart: "on-failure:5"
+    stop_grace_period: 5m                  # 给两个分片保存世界留时间
+    environment:
+      - TZ=Asia/Shanghai
+      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN}
+    ports:
+      - "10999-11000:10999-11000/udp"      # 游戏端口（Master/Caves）
+      - "12346-12347:12346-12347/udp"      # Steam 相关端口
+    volumes:
+      - ./data/dst_server:/opt/dst_server  # 游戏本体（宿主机持有）
+      - ./data/dst_data:/data              # 配置 + 存档
 ```
 
-目录布局：
+`.env`：
+
+```ini
+DST_CLUSTER_TOKEN=pds-g^KU_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+常用命令：
+
+```bash
+docker compose pull && docker compose up -d     # 更新镜像并重启
+docker compose logs -f                          # 跟随日志
+docker exec dst-server supervisorctl status     # 两个分片状态
+docker compose down                             # 停止（会等分片存盘）
+```
+
+## 快速开始（docker run）
+
+```bash
+mkdir -p data/dst_server data/dst_data
+
+docker run -d --name dst-server \
+  --platform linux/amd64 \
+  --restart on-failure:5 \
+  --stop-timeout 300 \
+  -p 10999-11000:10999-11000/udp \
+  -p 12346-12347:12346-12347/udp \
+  -e TZ=Asia/Shanghai \
+  -e DST_CLUSTER_TOKEN='pds-g^KU_xxxxxxxxxxxxxxxxxxxxxxxx' \
+  -v "$PWD/data/dst_server:/opt/dst_server" \
+  -v "$PWD/data/dst_data:/data" \
+  hufang360/dst-server:latest-slim
+```
+
+> `--stop-timeout 300` 对应 compose 的 `stop_grace_period: 5m`：不要改小，
+> 否则两个分片可能来不及存盘就被 SIGKILL。
+
+游戏文件已经预下载好（离线启动 / 想跑 64 位服务端）时：
+
+```bash
+docker run -d --name dst-server \
+  --platform linux/amd64 \
+  -p 10999-11000:10999-11000/udp \
+  -p 12346-12347:12346-12347/udp \
+  -e DST_CLUSTER_TOKEN='pds-g^KU_xxxxxxxxxxxxxxxxxxxxxxxx' \
+  -e DST_SERVER_ARCH=amd64 \
+  -e DST_SKIP_UPDATE=1 \
+  -e DST_SKIP_MOD_UPDATE=1 \
+  -v /path/to/dst_server:/opt/dst_server \
+  -v /path/to/dst_data:/data \
+  hufang360/dst-server:latest-slim
+```
+
+获取集群令牌：<https://accounts.klei.com/> → 游戏 → Don't Starve Together →
+「游戏服务器」→ 复制服务器票据（`pds-g^KU_...`）。
+
+## 目录与启动流程
 
 ```
 .
 ├── docker-compose.yml
+├── .env                       # DST_CLUSTER_TOKEN
 └── data/
-    ├── dst_server/   # 游戏本体（容器启动时 steamcmd 下载到这里）
-    └── dst_data/     # /data：服务器配置 + 存档（cluster_token.txt、Cluster_1/...）
+    ├── dst_server/            # /opt/dst_server：游戏本体（首次启动由 steamcmd 下载）
+    └── dst_data/              # /data：配置 + 存档
+        ├── Agreements/
+        └── DoNotStarveTogether/
+            └── Cluster_1/
+                ├── cluster.ini
+                ├── cluster_token.txt     # 由 DST_CLUSTER_TOKEN 生成
+                ├── Master/               # 主世界 server.ini
+                ├── Caves/                # 洞穴 server.ini
+                └── mods/
 ```
 
-首次启动时，如果 `data/dst_data` 是空的，容器会把内置的默认配置模板
-（`dst_default_config/`）复制进去，然后写入 `cluster_token.txt`。
+容器启动（`docker/entrypoint.sh`）依次做：
+
+1. 若 `/data` 为空，把内置默认配置模板（`dst_default_config/`）复制进去；
+2. 把 `DST_CLUSTER_TOKEN` 写入 `cluster_token.txt`（并去掉末尾换行）；
+3. 修正 `/data` 属主为 `dst`；
+4. `steamcmd +app_update 343050` 更新游戏本体（`DST_SKIP_UPDATE=1` 可跳过）；
+5. 把 `/opt/dst_server/mods` 换成软链接指向 `/data/.../mods`，并更新 mod
+   （`DST_SKIP_MOD_UPDATE=1` 可跳过）；
+6. 交给 supervisor 启动 Master + Caves 两个分片。
 
 启动完成后：
 
 ```bash
 docker ps --filter name=dst-server --format '{{.Status}}'   # 期望 Up (healthy)
-docker exec dst-server supervisorctl status                 # 期望 master/cave 都 RUNNING
+docker exec dst-server supervisorctl status                 # 期望两行 RUNNING
 ```
 
-> healthcheck 的 `start-period` 是 10 分钟：首次启动要 steamcmd 下载游戏，不要把它改小。
-> 状态在一段时间内显示 `starting` 是正常的。
+> healthcheck 的 `start-period` 是 10 分钟：首次启动要下载游戏本体，
+> 这段时间显示 `health: starting` 是正常的。两个分片都 RUNNING 才算 healthy。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DST_CLUSTER_TOKEN` | — | 集群令牌（必填），会写入 `data/dst_data/DoNotStarveTogether/<cluster>/cluster_token.txt` |
+| `DST_CLUSTER_TOKEN` | — | 集群令牌（必填），写入 `cluster_token.txt` |
 | `DST_CLUSTER_NAME` | `Cluster_1` | 集群目录名 |
 | `DST_SERVER_ARCH` | `x86` | `x86` 用 `bin/`（32 位），`amd64` 用 `bin64/`（64 位） |
-| `DST_SKIP_UPDATE` | `0` | 设为 `1` 跳过启动时的游戏本体更新（离线 / 已预下载） |
-| `DST_SKIP_MOD_UPDATE` | `0` | 设为 `1` 跳过启动时的 mod 更新 |
+| `DST_SKIP_UPDATE` | `0` | `1` = 跳过启动时的游戏本体更新（离线 / 已预下载） |
+| `DST_SKIP_MOD_UPDATE` | `0` | `1` = 跳过启动时的 mod 更新 |
 | `DST_USER_DATA_PATH` | `/data` | 配置与存档目录 |
 | `DST_SERVER_PATH` | `/opt/dst_server` | 游戏本体目录 |
-| `STEAMCMD_PATH` | `/opt/steamcmd/steamcmd.sh` | 设为 `/bin/true` 可禁用 steamcmd |
+| `STEAMCMD_PATH` | `/opt/steamcmd/steamcmd.sh` | 设为 `/bin/true` 可完全禁用 steamcmd |
 
-容器内用 supervisor 同时跑 **Master + Caves** 两个分片（端口 10999-11000/udp、12346-12347/udp）。
-
-## 构建与发布
-
-本地构建（Apple Silicon 上测 `linux/amd64` 请用 buildx）：
+## 构建
 
 ```bash
+# 默认：约 58MB 的 slim 镜像（首次启动时 steamcmd 自更新 + 下载游戏）
 docker buildx build --platform linux/amd64 -t dst-server:test --load .
+
+# 可选：构建期预热 steamcmd（约 170MB，首次启动更快）
+docker buildx build --platform linux/amd64 \
+  --build-arg STEAMCMD_PREWARM=1 -t dst-server:prewarm --load .
 ```
 
 镜像校验（不需要游戏文件）：
 
 ```bash
 docker run --rm --entrypoint bash dst-server:test -c '
-  /lib/x86_64-linux-gnu/libc.so.6 | head -1
-  /lib/i386-linux-gnu/libc.so.6   | head -1
-  ls -A /opt/dst_server            # 期望：空（slim，不含游戏本体）
+  /lib/x86_64-linux-gnu/libc.so.6 | head -1   # 期望 glibc 2.36-9+deb12uXX
+  /lib/i386-linux-gnu/libc.so.6   | head -1   # 32 位库存在
+  ls -A /opt/dst_server                       # 期望为空：镜像内无游戏本体
 '
-# 期望 glibc 2.36-9+deb12uXX
 ```
 
 有游戏文件时的动态库检查：
@@ -111,40 +207,57 @@ docker run --rm -v "$PWD/data/dst_server:/opt/dst_server:ro" --entrypoint bash d
     echo "[$b]"; ldd "$b" | grep "not found" || echo "  all resolved"; done'
 ```
 
-CI：[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
+## 体积与预热（`STEAMCMD_PREWARM`）
 
-- push 到 `master` / 每周一 03:00 UTC 定时 / 手动 `workflow_dispatch` 触发。
-- 构建后先跑 smoke test（glibc >= 2.29、i386 库、入口脚本、steamcmd），
-  再断言镜像内**没有**游戏本体，最后推 GHCR；配置了 Docker Hub secrets 时同时推 Docker Hub。
-- 需要 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`
-  （Docker Hub → Account Settings → Personal access tokens，Read/Write；
-  且 Docker Hub 上必须**先手动创建** `hufang360/dst-server` 仓库，否则 push 会被拒绝）。
+| 构建参数 | 压缩后体积 | 首次启动 |
+| --- | --- | --- |
+| `STEAMCMD_PREWARM=0`（默认，CI 发布的就是这个） | **约 58MB** | steamcmd 自更新 + 下载游戏，约 2GB、数分钟 |
+| `STEAMCMD_PREWARM=1` | 约 170MB | 直接下载游戏本体，快几分钟 |
+
+多出来的 ~110MB 就是 steamcmd 客户端自身（`linux32/`、`linux64/`、`package/`、
+`siteserverui/`）被预热进镜像的体积。**不要试图在构建期删掉其中任何一部分**：
+实测删掉后 steamcmd 会在首次启动时把同样的文件重新下载一遍，既没省空间，
+又白丢预热收益。
+
+## CI
+
+[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
+
+- 触发：push 到 `master` / 每周一 03:00 UTC（跟进 Debian 安全更新）/ 手动 `workflow_dispatch`。
+- 构建后先跑检查，全部通过才推送：
+  1. glibc ≥ 2.29 且存在 i386 库，入口脚本与 steamcmd 可执行；
+  2. supervisord 配置能展开全部 `%(ENV_*)s`；
+  3. **镜像内没有游戏本体**（`/opt/dst_server` 为空且全盘无 `dontstarve*` 二进制）。
+- 推送 GHCR（用 `GITHUB_TOKEN`）与 Docker Hub（需要 secrets
+  `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`，Docker Hub 上仓库需先存在）。
+- 只发布 `latest-slim`，不加 `latest` / `nightly` / `-sha-` 等 tag。
 
 ## 注意事项（踩过的坑）
 
-1. **`cluster.ini` 禁止行内 `;` 注释。** 新版本服务端会把行内注释当成值的一部分，
+1. **`cluster.ini` 禁止行内 `;` 注释。** 新版服务端会把行内注释当成值的一部分，
    例如 `shard_enabled = true ; enable shards` 会被解析成 `false`，导致洞穴分片自己当主分片去登记，
    日志刷 `Master Server Broadcast Error: E_ROWID_EXIST`，`game_mode` 报 `MOD ERROR`。
    注释请单独占一行（以 `;` 或 `#` 开头）。
-2. **`stop_grace_period` 必须大于两个分片的 `stopwaitsecs` 之和**：当前 5m > 120s × 2，
-   改小任何一边都可能让世界来不及保存就被 SIGKILL。
-3. **只支持 amd64**，不要在 CI 里加 `platforms: linux/arm64`。
+2. **`stop_grace_period` / `--stop-timeout` 必须大于两个分片的 `stopwaitsecs` 之和**
+   （当前 5m > 120s × 2），改小任何一边都可能让世界来不及保存就被 SIGKILL。
+3. **只支持 amd64**，不要在 CI 里加 `platforms: linux/arm64`；ARM 机器上要写 `platform: linux/amd64`。
 4. **不要把 `data/`、`.env` 提交到仓库**（含存档、`cluster_token.txt`、集群令牌明文）。
    已由 `.gitignore` 覆盖；若误推，请立刻去 Klei 账号页**重置令牌**。
 5. 上游 2022 年的镜像仍在 Docker Hub 的 `jamesits/dst-server` 命名空间下，
-   compose 里务必使用自己的镜像名，避免 `docker compose pull` 把镜像换回旧版。
-6. 构建期会访问 Steam 下载 steamcmd 并自我更新，网络抖动导致失败时重跑即可。
+   compose 里务必使用本仓库的镜像名，避免 `docker compose pull` 把镜像换回旧版。
+6. `DST_SERVER_ARCH=amd64` 需要 `/opt/dst_server/bin64/` 存在；只装了 32 位本体时会明确报错。
 7. 若将来 Debian 移除 i386 库，可改用 `DST_SERVER_ARCH=amd64` 去掉 32 位依赖，
    或退回 `debian:bullseye-slim`（glibc 2.31）。
 
 ## 与上游的差异
 
 - 基础镜像 `debian:buster-slim` → `debian:bookworm-slim`（glibc 2.28 → 2.36）。
-- 不再构建 `latest` / `nightly` / `steamcmd-rebase` 等变体，只保留 `latest-slim`。
-- 构建期不下载游戏本体（`DST_DOWNLOAD=0` 的等价行为），镜像内 `/opt/dst_server` 为空。
-- supervisor 改为在同一个容器内固定跑 Master + Caves 双分片，健康检查要求两者都 RUNNING。
-- 入口脚本重写：支持 `DST_SERVER_ARCH` 选择 32/64 位、支持 `DST_CLUSTER_NAME`，
-  空数据目录自动铺默认配置，令牌缺失时给出明确错误信息。
+- 只保留 `latest-slim`，不再构建 `latest` / `nightly` / `steamcmd-rebase` 变体。
+- 构建期默认不预热 steamcmd（体积与上游 slim 持平）；需要快启动时可 `STEAMCMD_PREWARM=1`。
+- supervisor 固定在一个容器内跑 Master + Caves 双分片，healthcheck 要求两者都 RUNNING。
+- 入口脚本重写：`DST_SERVER_ARCH` 选择 32/64 位并校验对应二进制、支持 `DST_CLUSTER_NAME`、
+  空数据目录自动铺默认配置、令牌缺失时给出明确错误、steamcmd 更新失败时降级为警告
+  （用已有游戏文件继续启动，避免 Steam 抖动导致重启循环）。
 - CI 从 Azure Pipelines / DaoCloud 换成 GitHub Actions，同时推 GHCR 与 Docker Hub。
 
 ## 许可

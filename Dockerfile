@@ -27,6 +27,15 @@ ARG DST_USER_DATA_PATH=/data
 ARG DST_SERVER_PATH=/opt/dst_server
 ARG DST_APP_ID=343050
 
+# 0 (default): ship the bare steamcmd (~58MB image). The client updates itself on the
+#               first container start (a few minutes, needs network).
+# 1:            run steamcmd's self-update at build time. The image grows by ~110MB
+#               (compressed) but the first container start is fast. Note: this only
+#               helps at all if the container can reach Steam at least once, and every
+#               part steamcmd needs is part of that layer - pruning it makes steamcmd
+#               download the same files again on start.
+ARG STEAMCMD_PREWARM=0
+
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     STEAMCMD_PATH=/opt/steamcmd/steamcmd.sh \
@@ -51,7 +60,7 @@ RUN set -eux; \
         lib32gcc-s1 lib32stdc++6 \
         libcurl3-gnutls libcurl3-gnutls:i386; \
     apt-get clean; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /var/cache/apt /usr/share/doc /usr/share/man
 
 # Unprivileged user + directories
 RUN set -eux; \
@@ -69,11 +78,12 @@ RUN set -eux; \
     test -x "${STEAMCMD_PATH}"; \
     chmod +x "${STEAMCMD_PATH}"
 
-# Run steamcmd twice at build time so that it finishes its self-update here
-# (otherwise every container start would download ~40MB of client again).
+# Optionally let steamcmd finish its self-update at build time (STEAMCMD_PREWARM=1)
 RUN set -eux; \
-    ( "${STEAMCMD_PATH}" +quit || true ); \
-    ( "${STEAMCMD_PATH}" +quit || true ); \
+    if [ "${STEAMCMD_PREWARM}" = "1" ]; then \
+        ( "${STEAMCMD_PATH}" +quit || true ); \
+        ( "${STEAMCMD_PATH}" +quit || true ); \
+    fi; \
     rm -rf /root/Steam /root/.steam
 
 # Scripts, supervisor config and default config templates
