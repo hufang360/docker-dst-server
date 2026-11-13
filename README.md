@@ -107,7 +107,7 @@ docker run -d --name dst-server \
 > `--stop-timeout 300` 对应 compose 的 `stop_grace_period: 5m`：不要改小，
 > 否则两个分片可能来不及存盘就被 SIGKILL。
 
-游戏文件已经预下载好（离线启动 / 想跑 64 位服务端）时：
+游戏本体已预下载、不想在启动时连 Steam 下载/更新（也想跑 64 位服务端）时：
 
 ```bash
 docker run -d --name dst-server \
@@ -125,6 +125,105 @@ docker run -d --name dst-server \
 
 获取集群令牌：<https://accounts.klei.com/> → 游戏 → Don't Starve Together →
 「游戏服务器」→ 复制服务器票据（`pds-g^KU_...`）。
+
+## 跳过更新 / 离线启动（`DST_SKIP_UPDATE` + `DST_SKIP_MOD_UPDATE`）
+
+这是本镜像相对上游多出来的能力：**上游入口脚本每次启动都无条件执行
+`steamcmd +runscript install_dst_server`，必须联网且每次都会校验/下载客户端与游戏本体；
+本镜像可以把这一步整个关掉。**
+
+| 变量 | 效果 |
+| --- | --- |
+| `DST_SKIP_UPDATE=1` | 完全不调用 steamcmd：不下载、不更新游戏本体，也不更新 steamcmd 客户端 |
+| `DST_SKIP_MOD_UPDATE=1` | 跳过 `-only_update_server_mods`，直接用 `/data/.../mods` 里已有的 mod |
+
+两个都设为 `1` 时，entrypoint 不会对 Steam 发起任何请求，启动只剩「写令牌 → 铺配置 →
+改属主 → 起 supervisor」，几秒级完成，适合：
+
+- 游戏本体用 `depotdownloader` / 别的机器预下载好、只想让容器跑起来的场景；
+- Steam 抽风、下载卡住时先让服务起来；
+- 内网/离线环境、以及想自己控制「什么时候更新」的场景。
+
+预下载本体可以用仓库 `docker-compose.yml` 里自带的 `depotdownloader` 工具容器
+（`profiles: tools`，默认不启动）：
+
+```bash
+docker compose run --rm depotdownloader
+```
+
+⚠️ **「跳过下载」不等于「完全离线」**：DST 服务端启动后仍要向 Klei/Steam 注册集群，
+真正断网的内网部署还需要在 `cluster.ini` 里设：
+
+```ini
+[NETWORK]
+offline_cluster = true
+```
+
+另外 `DST_SKIP_UPDATE=1` 时游戏本体必须**已经**存在于 `/opt/dst_server`
+（`bin/` 或 `bin64/` 下要有对应二进制），否则 entrypoint 会明确报错退出而不是静默启动。
+
+## 在 ARM 机器上运行（Apple Silicon / arm64）
+
+Klei 只发布 x86 / x64 的服务端二进制，所以本镜像只有 `linux/amd64`，
+在 arm64 机器上要靠模拟运行（Apple Silicon 用 Rosetta，Linux 用 QEMU/binfmt）。
+
+推荐分工：**`depotdownloader` 负责下载/更新游戏本体，`latest-slim` 只负责运行**。
+
+`hufang360/depotdownloader` 是多架构镜像（amd64 + arm64），在 Apple Silicon 上
+**原生运行**，不经过模拟；只有 `latest-slim` 里的 DST 服务端需要 `platform: linux/amd64`。
+
+**1) 用 DepotDownloader 把本体拉到 `./data/dst_server`**
+
+```bash
+docker compose run --rm depotdownloader      # 仓库自带，profiles: tools
+
+# 或不用 compose
+docker run --rm -v "$PWD/data/dst_server:/steam" \
+  hufang360/depotdownloader \
+  -app 343050 -os linux -osarch 64 -branch public -dir /steam -validate
+```
+
+`-osarch 64` 拉 64 位服务端（`bin64/`），`-osarch 32` 拉 32 位（`bin/`）。
+
+**2) 让 `latest-slim` 只当运行环境（不调用 steamcmd）**
+
+```yaml
+services:
+  dst-server:
+    image: hufang360/dst-server:latest-slim
+    platform: linux/amd64                   # arm 上必须有
+    container_name: dst-server
+    stop_grace_period: 5m
+    environment:
+      - TZ=Asia/Shanghai
+      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN}
+      - DST_SERVER_ARCH=amd64               # arm 上优先用 x64 二进制
+      - DST_SKIP_UPDATE=1                   # 别在模拟层里跑 32 位 steamcmd
+      - DST_SKIP_MOD_UPDATE=1
+    ports:
+      - "10999-11000:10999-11000/udp"
+      - "12346-12347:12346-12347/udp"
+    volumes:
+      - ./data/dst_server:/opt/dst_server
+      - ./data/dst_data:/data
+```
+
+为什么这样分工：
+
+- `steamcmd` 是 32 位 x86 程序，在 arm64 的模拟层里既慢又容易崩
+  （Apple Silicon 上实测会在 Rosetta 下段错误），所以干脆让运行容器不碰它；
+- DepotDownloader 有原生 arm64 版本，下载/更新不经过模拟层，而且与运行容器解耦：
+  **更新游戏不需要重启服务**，也方便固定版本/回滚；
+- `latest-slim` 提供的是运行环境本身：glibc 2.36、i386/x64 运行库、
+  supervisor 双分片、健康检查，容器里没有游戏本体，可以随便换版本。
+
+**更新流程**：先 `docker compose run --rm depotdownloader` 拉新版本，
+再 `docker compose restart dst-server`。mod 同理：`DST_SKIP_MOD_UPDATE=1` 时
+mod 不会自动更新，需要在别处用 steamcmd 更新好 `data/dst_data/.../mods`
+（以及 `ugc/`）后一起带上。
+
+> 性能提醒：Rosetta/QEMU 下跑 DST 服务端可用，但比原生 x86 主机慢，
+> 人数较多或要开高 tick 时建议换 x86_64 服务器。
 
 ## 目录与启动流程
 
@@ -150,9 +249,10 @@ docker run -d --name dst-server \
 1. 若 `/data` 为空，把内置默认配置模板（`dst_default_config/`）复制进去；
 2. 把 `DST_CLUSTER_TOKEN` 写入 `cluster_token.txt`（并去掉末尾换行）；
 3. 修正 `/data` 属主为 `dst`；
-4. `steamcmd +app_update 343050` 更新游戏本体（`DST_SKIP_UPDATE=1` 可跳过）；
-5. 把 `/opt/dst_server/mods` 换成软链接指向 `/data/.../mods`，并更新 mod
-   （`DST_SKIP_MOD_UPDATE=1` 可跳过）；
+4. `steamcmd +app_update 343050` 更新游戏本体；
+   **`DST_SKIP_UPDATE=1` 时整步跳过，steamcmd 一次都不执行**；
+5. 把 `/opt/dst_server/mods` 换成软链接指向 `/data/.../mods`，并更新 mod；
+   **`DST_SKIP_MOD_UPDATE=1` 时跳过 mod 更新**；
 6. 交给 supervisor 启动 Master + Caves 两个分片。
 
 启动完成后：
@@ -271,6 +371,8 @@ docker run --rm -v "$PWD/data/dst_server:/opt/dst_server:ro" --entrypoint bash d
 - 基础镜像 `debian:buster-slim` → `debian:bookworm-slim`（glibc 2.28 → 2.36）。
 - 只保留 `latest-slim`，不再构建 `latest` / `nightly` / `steamcmd-rebase` 变体。
 - 不预热 steamcmd，镜像只带 6MB 引导包（69MB vs 上游 58MB，差值是 bookworm 的 glibc 与 supervisor）。
+- 多出 `DST_SKIP_UPDATE` / `DST_SKIP_MOD_UPDATE` 两个开关：上游每次启动都无条件跑 steamcmd，
+  本镜像可以完全跳过下载/更新（见「跳过更新 / 离线启动」）。
 - supervisor 固定在一个容器内跑 Master + Caves 双分片，healthcheck 要求两者都 RUNNING。
 - 入口脚本重写：`DST_SERVER_ARCH` 选择 32/64 位并校验对应二进制、支持 `DST_CLUSTER_NAME`、
   空数据目录自动铺默认配置、令牌缺失时给出明确错误、steamcmd 更新失败时降级为警告

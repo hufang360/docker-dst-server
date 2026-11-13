@@ -10,7 +10,7 @@ services:
       - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN}
       # - DST_CLUSTER_NAME=Cluster_1
       # - DST_SERVER_ARCH=amd64     # run the 64-bit server instead (needs bin64/)
-      # - DST_SKIP_UPDATE=1         # offline / pre-downloaded game files
+      # - DST_SKIP_UPDATE=1         # never run steamcmd: use pre-downloaded game files
       # - DST_SKIP_MOD_UPDATE=1     # skip mod update on start
     ports:
       - "10999-11000:10999-11000/udp"
@@ -18,3 +18,14 @@ services:
     volumes:
       - ./data/dst_server:/opt/dst_server # game files (host-owned, NOT in the image)
       - ./data/dst_data:/data             # server config + saves
+
+  # Optional helper: pre-download the game files into ./data/dst_server.
+  #   docker compose run --rm depotdownloader
+  # Then start dst-server with DST_SKIP_UPDATE=1 (and DST_SKIP_MOD_UPDATE=1).
+  depotdownloader:
+    image: hufang360/depotdownloader # multi-arch: runs natively on arm64
+    profiles: ["tools"]
+    volumes:
+      - ./data/dst_server:/steam
+    command: >
+      -app 343050 -os linux -osarch 64 -branch public -dir /steam -validate
