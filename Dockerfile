@@ -27,15 +27,6 @@ ARG DST_USER_DATA_PATH=/data
 ARG DST_SERVER_PATH=/opt/dst_server
 ARG DST_APP_ID=343050
 
-# 0 (default): ship the bare steamcmd (~58MB image). The client updates itself on the
-#               first container start (a few minutes, needs network).
-# 1:            run steamcmd's self-update at build time. The image grows by ~110MB
-#               (compressed) but the first container start is fast. Note: this only
-#               helps at all if the container can reach Steam at least once, and every
-#               part steamcmd needs is part of that layer - pruning it makes steamcmd
-#               download the same files again on start.
-ARG STEAMCMD_PREWARM=0
-
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     STEAMCMD_PATH=/opt/steamcmd/steamcmd.sh \
@@ -70,21 +61,17 @@ RUN set -eux; \
     mkdir -p "${DST_USER_DATA_PATH}" "${DST_SERVER_PATH}" /opt/steamcmd /var/run; \
     chown -R "${DST_USER}:${DST_GROUP}" "${DST_USER_DATA_PATH}"
 
-# steamcmd (it self-updates on start)
+# steamcmd is shipped as the bare bootstrap package (~6MB). It downloads the real
+# client itself on the first container start. Pre-running that self-update at build
+# time would bake ~110MB (compressed) into the image, and it cannot be trimmed
+# afterwards: steamcmd re-downloads any missing piece (linux32/linux64/package/
+# siteserverui) on the next start, so pruning only cancels the benefit.
 RUN set -eux; \
     wget -q -O /tmp/steamcmd.tar.gz "${STEAMCMD_URL}"; \
     tar -xzf /tmp/steamcmd.tar.gz -C /opt/steamcmd; \
     rm -f /tmp/steamcmd.tar.gz; \
     test -x "${STEAMCMD_PATH}"; \
     chmod +x "${STEAMCMD_PATH}"
-
-# Optionally let steamcmd finish its self-update at build time (STEAMCMD_PREWARM=1)
-RUN set -eux; \
-    if [ "${STEAMCMD_PREWARM}" = "1" ]; then \
-        ( "${STEAMCMD_PATH}" +quit || true ); \
-        ( "${STEAMCMD_PATH}" +quit || true ); \
-    fi; \
-    rm -rf /root/Steam /root/.steam
 
 # Scripts, supervisor config and default config templates
 COPY docker/entrypoint.sh     /usr/local/bin/entrypoint.sh

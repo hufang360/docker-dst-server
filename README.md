@@ -34,9 +34,8 @@
   （`/opt/dst_server` 是空目录，游戏文件由 volume 提供）。
   上游 slim 是 58MB，差值主要是 `bookworm` 的 glibc 比 `buster` 大，以及
   supervisor 依赖的 python3（详见「体积」一节）。
-- 首次启动时 steamcmd 会自更新并下载游戏（约 2GB），之后重启不再下载。
-  想要「镜像里已预热 steamcmd、首次启动更快」的版本，可以自行构建并加
-  `--build-arg STEAMCMD_PREWARM=1`（镜像会涨到约 171MB，见下文「体积与预热」）。
+- 首次启动时 steamcmd 会自更新（约 213MB 客户端）并下载游戏（约 2GB），
+  之后同一个容器重启不再下载；镜像里不带这些文件，所以镜像才能这么小。
 - 仅 `linux/amd64`：Klei 只提供 x86/x64 服务端二进制，**没有 arm64**。
   在 ARM 机器（如 Apple Silicon）上运行时 compose 里需要 `platform: linux/amd64`。
 - 已包含 i386 运行库：DST 默认跑 32 位服务端，steamcmd 也跑 `linux32`。
@@ -182,12 +181,8 @@ docker exec dst-server supervisorctl status                 # 期望两行 RUNNI
 ## 构建
 
 ```bash
-# 默认：约 69MB（压缩后）的 slim 镜像（首次启动时 steamcmd 自更新 + 下载游戏）
+# 约 69MB（压缩后）：镜像只带 steamcmd 引导包，客户端与游戏在首次启动时下载
 docker buildx build --platform linux/amd64 -t dst-server:test --load .
-
-# 可选：构建期预热 steamcmd（约 171MB，压缩后，首次启动更快）
-docker buildx build --platform linux/amd64 \
-  --build-arg STEAMCMD_PREWARM=1 -t dst-server:prewarm --load .
 ```
 
 镜像校验（不需要游戏文件）：
@@ -209,27 +204,31 @@ docker run --rm -v "$PWD/data/dst_server:/opt/dst_server:ro" --entrypoint bash d
     echo "[$b]"; ldd "$b" | grep "not found" || echo "  all resolved"; done'
 ```
 
-## 体积（`STEAMCMD_PREWARM`）
+## 体积
 
-| 构建参数 | 压缩后 | 未压缩 | 首次启动 |
-| --- | --- | --- | --- |
-| `STEAMCMD_PREWARM=0`（默认，CI 发布的就是这个） | **约 69MB** | 185MB | steamcmd 自更新 + 下载游戏（约 2GB、数分钟） |
-| `STEAMCMD_PREWARM=1` | 约 171MB | 407MB | 直接下载游戏本体，快几分钟 |
-| 上游 `jamesits/dst-server:latest-slim`（对比） | 58MB | — | 每次启动都重新下载 steamcmd 客户端 |
+| 镜像 | 压缩后 | 未压缩 |
+| --- | --- | --- |
+| 本镜像 `latest-slim` | **68.6MB** | 185MB |
+| 上游 `jamesits/dst-server:latest-slim`（对比） | 58.2MB | — |
 
-为什么是 69MB 而不是上游的 58MB（本镜像主要占用，未压缩）：
+本镜像的占用明细（未压缩）：
 
 | 组成 | 大小 | 说明 |
 | --- | --- | --- |
-| `debian:bookworm-slim` + glibc 2.36 + i386 库 | ~110MB | 上游用 `buster-slim`（glibc 2.28，已无法运行新版服务端） |
+| `debian:bookworm-slim` + glibc 2.36 + i386 库 | ~110MB | 上游用 `buster-slim`（glibc 2.28，已跑不了新版服务端） |
 | supervisor + python3.11 | ~33MB | 单容器跑 Master + Caves 双分片的进程管理 |
 | steamcmd 引导包 | 6MB | 首次启动时自更新到完整客户端 |
 | 其它（ca-certificates / wget / 默认配置模板） | ~7MB | |
 
-多出来的 ~110MB（`STEAMCMD_PREWARM=1` 时）就是 steamcmd 客户端自身
-（`linux32/`、`linux64/`、`package/`、`siteserverui/`）被预热进镜像的体积。
-**不要试图在构建期删掉其中任何一部分**：实测删掉后 steamcmd 会在首次启动时
-把同样的文件重新下载一遍，既没省空间，又白丢预热收益。
+与上游差的 ~10MB 主要来自更新的 glibc 和 i386 库，不是可以随便砍的冗余。
+
+**关于「构建期预热 steamcmd」**：不做。在 `docker build` 里跑
+`steamcmd.sh +quit` 能把首次启动时的客户端下载提前到构建期，但会把
+`linux32/`、`linux64/`、`package/`、`siteserverui/` 共约 213MB 烤进镜像，
+压缩后多 ~102MB（镜像变成 171MB）；而且这部分**不能事后裁剪**——实测删掉其中
+任何一部分，steamcmd 都会在下次启动时把同样的文件重新下载一遍，等于白删。
+预热省下的只是 steamcmd 客户端那几分钟（游戏本体 ~2GB 照样要下），
+和我们「slim、无游戏本体」的定位不符，所以直接不提供这个开关。
 
 还想更小的话只剩两条路，取舍都很硬，所以没做：
 1. 去掉 supervisor，换成几十行的 shell 进程管理 → 省 ~13MB，
@@ -271,8 +270,7 @@ docker run --rm -v "$PWD/data/dst_server:/opt/dst_server:ro" --entrypoint bash d
 
 - 基础镜像 `debian:buster-slim` → `debian:bookworm-slim`（glibc 2.28 → 2.36）。
 - 只保留 `latest-slim`，不再构建 `latest` / `nightly` / `steamcmd-rebase` 变体。
-- 构建期默认不预热 steamcmd（69MB vs 上游 58MB，差值是 bookworm 的 glibc 与 supervisor）；
-  需要快启动时可 `STEAMCMD_PREWARM=1`。
+- 不预热 steamcmd，镜像只带 6MB 引导包（69MB vs 上游 58MB，差值是 bookworm 的 glibc 与 supervisor）。
 - supervisor 固定在一个容器内跑 Master + Caves 双分片，healthcheck 要求两者都 RUNNING。
 - 入口脚本重写：`DST_SERVER_ARCH` 选择 32/64 位并校验对应二进制、支持 `DST_CLUSTER_NAME`、
   空数据目录自动铺默认配置、令牌缺失时给出明确错误、steamcmd 更新失败时降级为警告

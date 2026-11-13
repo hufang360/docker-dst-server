@@ -35,8 +35,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       # Build once, keep it locally for the checks below.
-      # STEAMCMD_PREWARM defaults to 0 so the published image stays ~58MB compressed;
-      # build with --build-arg STEAMCMD_PREWARM=1 locally if you prefer faster first start.
+      # No steamcmd pre-warming: the image ships the 6MB bootstrap only (~69MB compressed).
       - name: Build image
         uses: docker/build-push-action@v6
         with:
