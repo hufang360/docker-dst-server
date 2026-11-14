@@ -190,7 +190,7 @@ dd 版则解决 arm 上「32 位 steamcmd 在模拟层里崩」的问题。
 | 镜像 | 未压缩 | 说明 |
 | --- | --- | --- |
 | `latest-slim` | ~185MB | debian + i386 库 + supervisor + steamcmd 引导包(6MB) |
-| `latest-slim-dd` | ~321MB | 上面这些 + DepotDownloader 单文件(82MB)，不含 steamcmd |
+| `latest-slim-dd` | ~260MB | 上面这些 + DepotDownloader 单文件(~80MB)，不含 steamcmd |
 
 GitHub Actions 一个 workflow、两个 job，各自「先自检、全过才推送」：
 
