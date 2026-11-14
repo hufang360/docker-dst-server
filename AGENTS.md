@@ -20,53 +20,60 @@
 ## 镜像 tag 策略（重要）
 
 - 只发布两个 tag，**不要**加 `latest` / `nightly` / `-sha-` 之类的别名：
-  - `latest-slim`：运行镜像。**只有 linux/amd64**，因为 Klei 不提供 arm64 服务端二进制。
-    任何情况下都不要给它加 `platforms: linux/arm64`。
-  - `latest-slim-dd`：DepotDownloader 下载器（`dd` = DepotDownloader 缩写），
-    `linux/amd64` + `linux/arm64` 双架构，arm64 原生运行。
+  - `latest-slim`：steamcmd 版（`Dockerfile`）。**只有 linux/amd64**，
+    因为 Klei 不提供 arm64 服务端二进制。任何情况下都不要给它加 `platforms: linux/arm64`。
+  - `latest-slim-dd`：DepotDownloader 版（`docker/DepotDownloader/Dockerfile`，`dd` = DepotDownloader）。
+    也是 **只有 linux/amd64**：arm 主机靠 Rosetta / QEMU 模拟运行。
+- 两个 tag **内容不同、长期共存**：只差「谁来下载本体」（steamcmd vs DepotDownloader），
+  运行环境 / 入口流程 / 路径完全一致。不要合并成一个镜像、也不要让两个 tag 指同一份镜像。
 - tag 命名风格与 `latest-slim` 保持一致（`latest-slim-<后缀>`）。
 - 两个 tag 都**不含游戏本体**，这是项目定位，任何改动都要守住。
 
 ## 设计原则
 
-- ARM 机器上「下载」和「运行」分开：下载用原生 arm64 的 DepotDownloader，
-  运行用 amd64 的 `latest-slim`（`platform: linux/amd64` + `DST_SKIP_UPDATE=1`）。
-  理由是 `steamcmd` 是 32 位 x86，在 Rosetta/QEMU 下又慢又容易崩。
+- 两个镜像容器内路径必须一致，保证同一份宿主机 `data/` 可以互换启动：
+  游戏本体 `/opt/dst_server`，配置/存档 `/data`（与上游 `jamesits/dst-server` 一致）。
+- `latest-slim` 继续用 steamcmd：x86 主机的常规路径，也是 DepotDownloader 出问题时的兜底。
+- `latest-slim-dd` 用 DepotDownloader：`steamcmd` 是 32 位 x86，在 Rosetta/QEMU 下又慢又
+  容易崩，这是 dd 版唯一的存在理由。dd 版自带完整运行环境，arm 上一条
+  `docker compose up -d`（compose 里把镜像换成 `latest-slim-dd`）就能直接开服，
+  不需要第二个「下载器容器」。
+- dd 版不要退回去依赖 steamcmd，也不要把 DepotDownloader 塞进 slim 版。
 - **不做构建期 steamcmd 预热**：会往镜像里烤约 213MB 且事后删不掉（删了下次启动会重下）。
-- 保持镜像瘦身：`latest-slim` 未压缩体积的 CI 上限是 250MiB，下载器镜像上限 400MiB。
-- 配置全部走环境变量，变量前缀 `DST_`（下载器专属的用 `DST_DEPOT_`）；
-  提供一次性任务和「只打印命令不执行」的 dry-run 开关，方便验证与排查。
+- 保持镜像瘦身：`latest-slim` 未压缩体积的 CI 上限 250MiB，`latest-slim-dd` 上限 380MiB。
+- 配置全部走环境变量，变量前缀 `DST_`（DepotDownloader 专属的用 `DST_DEPOT_`）；
+  提供一次性任务（dd 版里的 `dst-depot`）和「只打印命令不执行」的 dry-run 开关。
 - 涉及 depot 下载默认拉 64 位本体（`bin64/`），对应运行侧 `DST_SERVER_ARCH=amd64`。
 
 ## 配置分工
 
-- 运行镜像：`docker-compose.yml`，只跑服务器（内部用 steamcmd 自更新）。
-- 下载器流程：`docker-compose.dd.yml`，先下载再启动，用
-  `depends_on: condition: service_completed_successfully` 保证顺序。
-- 两个 compose 文件各自独立可用，不要合并成一个。
+- 只有一个 `docker-compose.yml`：默认 `latest-slim`（steamcmd 版），
+  要用 DepotDownloader 版就把 `image` 那行改成 `latest-slim-dd`（其余完全相同）。
+- **不使用 `.env` 文件**：令牌直接写在 compose 的 `environment` 里，少一层隐式配置。
 
 ## CI 要求
 
-- 两个 tag 各一个 job，**先自检再推送**；自检不通过就不要推。
-- 运行镜像自检：glibc ≥ 2.29、i386 库存在、supervisord 能展开 `%(ENV_*)s`、
-  镜像内无 `dontstarve*` 二进制、体积阈值。
-- 下载器自检：默认参数 / 环境变量覆盖 / 参数透传三种用法的输出精确比对，
-  `/steam` 为空，推送后用 `imagetools inspect` 断言 amd64 与 arm64 都在。
-- 多架构推送用 `docker/build-push-action`（它负责把 gha 缓存的凭据接好），
+- 两个 job，各管一个 tag，**先自检再推送**；自检不通过就不要推。
+- slim 自检：glibc ≥ 2.29、i386 库存在、steamcmd 可执行、supervisord 能展开 `%(ENV_*)s`、
+  镜像内无 `dontstarve*` 二进制、体积 < 250MiB。
+- dd 自检：glibc ≥ 2.29、i386 库存在、DepotDownloader/`dst-depot` 可执行、镜像内没有 steamcmd、
+  默认参数 / 环境变量覆盖 / 参数透传三种用法输出精确比对、完整启动流程 dry-run、
+  镜像内无 `dontstarve*` 二进制、体积 < 380MiB。
+- 推送用 `docker/build-push-action`（它负责把 gha 缓存的凭据接好），
   不要在 `run:` 里手搓 `buildx build` + gha cache。
-- 基础镜像本身已是多架构、且 Dockerfile 里没有交叉运行的 `RUN` 时，**不需要 QEMU**。
+- 两个镜像都只构建 `linux/amd64`，不需要 QEMU：`hufang360/depotdownloader` 那一层只 `COPY`、不执行。
 
 ## 安全
 
 - 绝不把真实令牌、密钥、密码写进仓库任何文件（包括文档里的示例）。
   文档里只描述格式，例如集群令牌「以 `pds-g^KU_` 开头」。
-- 存档与令牌目录不入库；提醒用户不要把 `.env`、`data/` 提交上去，
+- 存档与令牌目录不入库；提醒用户不要把 `data/` 提交上去，
   万一泄露要立刻去 Klei 账号页重置令牌。
 
 ## 验证习惯
 
-- 改完 Dockerfile：本地按 amd64、arm64 各构建一次并运行 dry-run 断言。
-- 改完 compose：`docker compose config -q`（含 `-f` 指定文件）确认能解析。
+- 改完 Dockerfile：本地按 amd64 构建一次，跑一遍 dry-run 与启动流程断言。
+- 改完 compose：`docker compose config -q` 确认能解析。
 - 改完 workflow：确认 YAML 可解析、job/step 结构符合预期。
 - 网络受限导致镜像 tag 解析失败时，可退回 legacy builder 或直接用本地镜像 ID 构建；
   这只影响本地验证，不必因此改 CI 配置。

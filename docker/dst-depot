@@ -1,0 +1,49 @@
+#!/bin/sh
+# 用环境变量拼出 DepotDownloader 命令并执行（本镜像唯一的游戏本体下载方式）。
+#
+#   不传参数            -> 用 DST_APP_ID / DST_DEPOT_OS / DST_DEPOT_OSARCH /
+#                          DST_DEPOT_BRANCH / DST_DEPOT_DIR / DST_DEPOT_VALIDATE 拼出命令
+#   传了参数            -> 原样透传给 DepotDownloader（完全手动控制）
+#   DST_DEPOT_DRYRUN=1  -> 只把最终命令行打印到 stdout 然后退出（排查 / CI 自检用）
+#
+# 单独使用（只下载，不起服务器）：
+#   docker run --rm -v "$PWD/data/dst_server:/opt/dst_server" <image> dst-depot
+#   docker run --rm -v "$PWD/data/dst_server:/opt/dst_server" <image> -app 343050 -os linux -osarch 64 -dir /opt/dst_server
+set -eu
+
+DST_SERVER_PATH=${DST_SERVER_PATH:-/opt/dst_server}
+DST_APP_ID=${DST_APP_ID:-343050}
+DST_DEPOT_OS=${DST_DEPOT_OS:-linux}
+DST_DEPOT_OSARCH=${DST_DEPOT_OSARCH:-64}
+DST_DEPOT_BRANCH=${DST_DEPOT_BRANCH:-public}
+# 默认和运行目录一致：下载完就能直接用，不需要再挪文件
+DST_DEPOT_DIR=${DST_DEPOT_DIR:-${DST_SERVER_PATH}}
+DST_DEPOT_VALIDATE=${DST_DEPOT_VALIDATE:-1}
+DST_DEPOT_DRYRUN=${DST_DEPOT_DRYRUN:-0}
+
+if [ "$#" -eq 0 ]; then
+    set -- -app "${DST_APP_ID}" -os "${DST_DEPOT_OS}" -osarch "${DST_DEPOT_OSARCH}"
+    if [ -n "${DST_DEPOT_BRANCH}" ]; then
+        set -- "$@" -branch "${DST_DEPOT_BRANCH}"
+    fi
+    set -- "$@" -dir "${DST_DEPOT_DIR}"
+    case "${DST_DEPOT_VALIDATE}" in
+        1 | true | TRUE | yes | on) set -- "$@" -validate ;;
+    esac
+fi
+
+if [ "${DST_DEPOT_DRYRUN}" = "1" ]; then
+    printf '%s\n' "$*"
+    exit 0
+fi
+
+# 服务器启动时会把 ${DST_SERVER_PATH}/mods 换成指向 /data 的软链接（mod 持久化在 /data）。
+# DepotDownloader 遇到已存在的路径会直接报 "The file .../mods already exists" 退出，
+# 所以这里删掉这个软链接让它重新下载一份真实目录；链接指向的目标在 /data 卷里，不受影响，
+# 服务端下次启动会再把它换回软链接。
+if [ -L "${DST_DEPOT_DIR}/mods" ]; then
+    printf '[dst-depot] 移除 %s/mods 软链接（由服务端创建，指向 /data）\n' "${DST_DEPOT_DIR}" >&2
+    rm -f "${DST_DEPOT_DIR}/mods"
+fi
+
+exec /usr/local/bin/DepotDownloader "$@"

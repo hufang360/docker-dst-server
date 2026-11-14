@@ -1,9 +1,9 @@
 name: docker-publish
 
-# Two tags are published, neither contains game files:
-#   latest-slim     - runtime image, linux/amd64 only (Klei ships no arm64 server)
-#   latest-slim-dd  - DepotDownloader helper, linux/amd64 + linux/arm64, so arm64 hosts
-#                     can download the game files natively (no steamcmd under emulation)
+# 两个 tag，下载方式不同、其余相同（都不含游戏本体）：
+#   latest-slim     - steamcmd 版，linux/amd64 only
+#   latest-slim-dd  - DepotDownloader 版，linux/amd64 only
+# 两者容器内路径一致（本体 /opt/dst_server、配置存档 /data），可以读同一份宿主机 data/。
 # Registries: GitHub Container Registry (always) + Docker Hub (when secrets exist).
 
 on:
@@ -31,7 +31,7 @@ env:
   TAG_DD: latest-slim-dd
 
 jobs:
-  build-test-push:
+  build-slim:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -102,20 +102,12 @@ jobs:
           bytes=$(docker image inspect "${LOCAL_IMAGE}" --format '{{.Size}}')
           mb=$(( bytes / 1024 / 1024 ))
           echo "uncompressed image size: ${mb}MiB"
-          echo "### Image size: ${mb}MiB (uncompressed)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### latest-slim size: ${mb}MiB (uncompressed)" >> "$GITHUB_STEP_SUMMARY"
           # slim build should stay lean; a big jump means something got baked in by mistake
           [ "$mb" -lt 250 ] || { echo "image grew unexpectedly (${mb}MiB)"; exit 1; }
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Push to GHCR
-        run: |
-          set -eux
-          IMAGE="ghcr.io/${{ github.repository_owner }}/dst-server:${TAG_SLIM}"
-          docker tag "${LOCAL_IMAGE}" "${IMAGE}"
-          docker push "${IMAGE}"
-          echo "### GHCR: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check Docker Hub secrets
         id: dockerhub
@@ -129,6 +121,14 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::warning::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN not set, skipping Docker Hub push"
           fi
+
+      - name: Push to GHCR
+        run: |
+          set -eux
+          IMAGE="ghcr.io/${{ github.repository_owner }}/dst-server:${TAG_SLIM}"
+          docker tag "${LOCAL_IMAGE}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "### GHCR: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push to Docker Hub
         if: steps.dockerhub.outputs.enabled == 'true'
@@ -143,66 +143,106 @@ jobs:
           docker push "${IMAGE}"
           echo "### Docker Hub: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Digests
-        run: |
-          set -eux
-          docker image inspect "${LOCAL_IMAGE}" --format '{{json .RepoDigests}}' || true
-
-  # latest-slim-dd: DepotDownloader 的薄封装（只加了一层 entrypoint + 默认参数）。
-  # 基础镜像 hufang360/depotdownloader 本身就是多架构，且这里没有任何 RUN
-  # 里的交叉运行，所以不需要 setup-qemu 也能构建 arm64 变体。
-  build-push-downloader:
+  # latest-slim-dd：DepotDownloader 版。运行环境和 latest-slim 相同，只是把 steamcmd 换成
+  # DepotDownloader（单文件 .NET 程序，arm 的模拟层里也能正常跑）。
+  build-dd:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build downloader image (amd64, for checks)
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/DepotDownloader/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64 # 服务端只有 x64 二进制，arm 主机靠 Rosetta / QEMU 模拟
           push: false
           load: true
           tags: ${{ env.LOCAL_IMAGE_DD }}
           cache-from: type=gha,scope=dd
           cache-to: type=gha,mode=max,scope=dd
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
-      # 默认参数 / 环境变量覆盖 / 原样透传 三种用法都要对，且镜像里不能有游戏本体
-      - name: Smoke test (defaults / env override / passthrough)
+      - name: Smoke test (runtime env / DepotDownloader)
         run: |
           set -eux
-          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 "${LOCAL_IMAGE_DD}")
-          [ "${out}" = "-app 343050 -os linux -osarch 64 -branch public -dir /steam -validate" ]
-
-          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 \
-                  -e DST_DEPOT_OSARCH=32 -e DST_DEPOT_VALIDATE=0 "${LOCAL_IMAGE_DD}")
-          [ "${out}" = "-app 343050 -os linux -osarch 32 -branch public -dir /steam" ]
-
-          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 "${LOCAL_IMAGE_DD}" \
-                  -app 343050 -osarch 32 -dir /steam)
-          [ "${out}" = "-app 343050 -osarch 32 -dir /steam" ]
-
-          docker run --rm --entrypoint sh "${LOCAL_IMAGE_DD}" -c '
+          docker run --rm --entrypoint bash "${LOCAL_IMAGE_DD}" -c '
             set -eux
+            /lib/x86_64-linux-gnu/libc.so.6 | head -1
+            /lib/i386-linux-gnu/libc.so.6   | head -1
+            glibc=$(/lib/x86_64-linux-gnu/libc.so.6 | head -1 | grep -oE "2\.[0-9]+" | head -1)
+            [ "$(printf "%s\n2.29\n" "$glibc" | sort -V | tail -1)" = "$glibc" ] || { echo "glibc too old: $glibc"; exit 1; }
             test -x /usr/local/bin/DepotDownloader
+            test -x /usr/local/bin/dst-depot
             test -x /usr/local/bin/entrypoint.sh
-            test -x /usr/local/bin/dst-depot-entrypoint.sh
-            test -z "$(ls -A /steam)"
+            test -x /usr/local/bin/healthcheck.sh
+            test -x /usr/local/bin/dst-server
+            test -f /etc/supervisor/supervisord.conf
+            test -f /licenses/DepotDownloader-LICENSE
+            test ! -e /opt/steamcmd
           '
+
+      - name: Validate supervisord config
+        run: |
+          set -eux
+          docker run --rm -i --entrypoint python3 "${LOCAL_IMAGE_DD}" - <<'PY'
+          from supervisor.options import ServerOptions
+          ServerOptions().realize(["-c", "/etc/supervisor/supervisord.conf"])
+          print("supervisord config ok")
+          PY
+
+      - name: Assert image has no DST game files
+        run: |
+          set -eux
+          docker run --rm --entrypoint bash "${LOCAL_IMAGE_DD}" -c '
+            set -eux
+            test -d /opt/dst_server
+            test -z "$(ls -A /opt/dst_server)"
+            test ! -e /opt/dst_server/bin
+            test ! -e /opt/dst_server/bin64
+            if find / -xdev -name "dontstarve_dedicated_server_nullrenderer*" 2>/dev/null | grep -q .; then
+              echo "game binaries found inside the image!"; exit 1
+            fi
+          '
+
+      # DepotDownloader defaults / env override / raw passthrough must be exact
+      - name: Smoke test (DepotDownloader arguments)
+        run: |
+          set -eux
+          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 "${LOCAL_IMAGE_DD}" dst-depot)
+          [ "${out}" = "-app 343050 -os linux -osarch 64 -branch public -dir /opt/dst_server -validate" ]
+
+          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 -e DST_DEPOT_OSARCH=32 -e DST_DEPOT_VALIDATE=0 \
+                  "${LOCAL_IMAGE_DD}" dst-depot)
+          [ "${out}" = "-app 343050 -os linux -osarch 32 -branch public -dir /opt/dst_server" ]
+
+          # 手动传参：entrypoint 看到前导 "-" 就直接交给 DepotDownloader
+          out=$(docker run --rm -e DST_DEPOT_DRYRUN=1 "${LOCAL_IMAGE_DD}" -app 343050 -osarch 32 -dir /opt/dst_server)
+          [ "${out}" = "-app 343050 -osarch 32 -dir /opt/dst_server" ]
+
+      # 完整启动流程的 dry-run：初始化配置 + 打印下载命令 + 不启动服务器
+      - name: Smoke test (server start-up dry run)
+        run: |
+          set -eux
+          out=$(docker run --rm -e DST_CLUSTER_TOKEN=ci-dummy -e DST_DEPOT_DRYRUN=1 "${LOCAL_IMAGE_DD}")
+          printf '%s\n' "${out}"
+          printf '%s\n' "${out}" | grep -q -- "-dir /opt/dst_server"
+          printf '%s\n' "${out}" | grep -q "只打印命令，不启动服务器"
 
       - name: Report image size
         run: |
           set -eux
           bytes=$(docker image inspect "${LOCAL_IMAGE_DD}" --format '{{.Size}}')
           mb=$(( bytes / 1024 / 1024 ))
-          echo "uncompressed downloader image size: ${mb}MiB"
+          echo "uncompressed downloader-variant image size: ${mb}MiB"
           echo "### latest-slim-dd size: ${mb}MiB (uncompressed)" >> "$GITHUB_STEP_SUMMARY"
-          # 基础镜像（含 DepotDownloader 单文件二进制）约 230MB，留点余量
-          [ "$mb" -lt 400 ] || { echo "downloader image grew unexpectedly (${mb}MiB)"; exit 1; }
+          # debian bookworm + supervisor + i386 库 + DepotDownloader(82MB) ≈ 321MB
+          [ "$mb" -lt 380 ] || { echo "image grew unexpectedly (${mb}MiB)"; exit 1; }
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -215,57 +255,33 @@ jobs:
         run: |
           if [ -n "${DH_USER}" ] && [ -n "${DH_TOKEN}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "${DH_TOKEN}" | docker login docker.io -u "${DH_USER}" --password-stdin
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::warning::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN not set, skipping Docker Hub push"
           fi
 
-      - name: Resolve target tags
-        id: tags
-        env:
-          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          DH_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+      - name: Push to GHCR
         run: |
           set -eux
-          {
-            echo "list<<EOF"
-            echo "ghcr.io/${{ github.repository_owner }}/dst-server:${TAG_DD}"
-            if [ "${DH_ENABLED}" = "true" ]; then
-              echo "${DH_USER}/dst-server:${TAG_DD}"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/dst-server:${TAG_DD}"
+          docker tag "${LOCAL_IMAGE_DD}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "### GHCR: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
-      # 一次构建同时出 amd64 + arm64 两个 manifest；两部分内容完全一样
-      - name: Push multi-arch (amd64 + arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/DepotDownloader/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.list }}
-          cache-from: type=gha,scope=dd
-          cache-to: type=gha,mode=max,scope=dd
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Verify both platforms are published
+      - name: Push to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
         env:
           DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          DH_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -eux
-          refs=("ghcr.io/${{ github.repository_owner }}/dst-server:${TAG_DD}")
-          if [ "${DH_ENABLED}" = "true" ]; then
-            refs+=("${DH_USER}/dst-server:${TAG_DD}")
-          fi
-          for ref in "${refs[@]}"; do
-            manifest=$(docker buildx imagetools inspect "${ref}")
-            printf '%s\n' "${manifest}"
-            printf '%s\n' "${manifest}" | grep -q 'linux/amd64'
-            printf '%s\n' "${manifest}" | grep -q 'linux/arm64'
-            echo "### ${ref}: amd64 + arm64" >> "$GITHUB_STEP_SUMMARY"
-          done
+          echo "${DH_TOKEN}" | docker login docker.io -u "${DH_USER}" --password-stdin
+          IMAGE="${DH_USER}/dst-server:${TAG_DD}"
+          docker tag "${LOCAL_IMAGE_DD}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "### Docker Hub: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Digests
+        run: |
+          set -eux
+          docker image inspect "${LOCAL_IMAGE_DD}" --format '{{json .RepoDigests}}' || true

@@ -1,22 +1,30 @@
+# 饥荒联机版专用服务器
+#
+# 镜像二选一（路径、配置完全一样，随时可换，本体不用重下）：
+#   hufang360/dst-server:latest-slim      steamcmd 下载，默认，x86 主机用它
+#   hufang360/dst-server:latest-slim-dd   DepotDownloader 下载，ARM 主机或 steamcmd 出问题时用
+#
+# 第一次用：把下面的 DST_CLUSTER_TOKEN 换成你的集群令牌（Klei 账号页获取），然后
+#   docker compose up -d
+#
+# 只更新本体、不起服务器（DepotDownloader 版）：
+#   docker compose run --rm dst-server dst-depot
 services:
   dst-server:
-    image: ${DST_IMAGE:-hufang360/dst-server:latest-slim}
-    platform: linux/amd64 # Klei 没有发布 arm64 服务端，这一行不要删（arm 机器靠模拟运行）
+    image: hufang360/dst-server:latest-slim
     container_name: dst-server
-    restart: "on-failure:5" # 失败后重启，最多 5 次
-    stop_grace_period: 5m # 必须大于 supervisor 的 stopwaitsecs(120s) × 2 个分片，留给世界存盘
+    platform: linux/amd64                    # 服务端只有 x64 二进制，arm 机器靠模拟运行，别删
+    restart: "on-failure:5"                  # 失败后重启，最多 5 次
+    stop_grace_period: 5m                    # 留给两个分片存盘，要比 supervisor 的停服时间大
     environment:
       - TZ=Asia/Shanghai
-      - DST_CLUSTER_TOKEN=${DST_CLUSTER_TOKEN} # 集群令牌（必填），来自 Klei 账号页
-      # - DST_CLUSTER_NAME=Cluster_1        # 集群目录名，开多个服务器时改这个
-      # - DST_SERVER_ARCH=amd64             # 改跑 64 位服务端（需要 bin64/ 已下载）
-      # - DST_SKIP_UPDATE=1                 # 完全不调用 steamcmd：用已下载好的游戏本体
-      # - DST_SKIP_MOD_UPDATE=1             # 启动时不更新 mod
+      - "DST_CLUSTER_TOKEN=pds-g^KU_你的令牌"   # 必填，来自 Klei 账号页，别外传
+      # - DST_SERVER_ARCH=amd64              # 改跑 64 位服务端（需要 bin64/ 已下载）
+      # - DST_SKIP_UPDATE=1                  # 完全不下载本体：用已下载好的游戏本体
+      # - DST_SKIP_MOD_UPDATE=1              # 启动时不更新 mod
     ports:
-      - "10999-11000:10999-11000/udp" # 游戏端口（Master / Caves 两个分片）
-      - "12346-12347:12346-12347/udp" # Steam 相关端口
+      - "10999-11000:10999-11000/udp"        # 游戏端口（Master / Caves 两个分片）
+      - "12346-12347:12346-12347/udp"        # Steam 相关端口
     volumes:
-      - ./data/dst_server:/opt/dst_server # 游戏本体（约 2GB，放在宿主机，不打进镜像）
-      - ./data/dst_data:/data             # 配置 + 存档（要备份的是这个）
-  # 需要预下载 / 在 arm 机器上更新游戏本体：用 docker-compose.dd.yml
-  #   docker compose -f docker-compose.dd.yml run --rm depotdownloader
+      - ./data/dst_server:/opt/dst_server    # 游戏本体（约 4GB）
+      - ./data/dst_data:/data                # 配置 + 存档（要备份的是这个）
